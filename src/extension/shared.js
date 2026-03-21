@@ -199,6 +199,7 @@ export function createClientStatus(partial = {}) {
     engineReady: Boolean(partial.engineReady),
     backgroundConnected: Boolean(partial.backgroundConnected),
     youtubeApiReady: Boolean(partial.youtubeApiReady),
+    audioPrimed: Boolean(partial.audioPrimed),
     autoplayBlocked: Boolean(partial.autoplayBlocked),
     errors: Array.isArray(partial.errors) ? partial.errors.slice(0, 8) : [],
     transportStatus: partial.transportStatus || TRANSPORT_STOPPED,

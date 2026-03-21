@@ -3627,6 +3627,7 @@ function createClientStatus(partial = {}) {
     engineReady: Boolean(partial.engineReady),
     backgroundConnected: Boolean(partial.backgroundConnected),
     youtubeApiReady: Boolean(partial.youtubeApiReady),
+    audioPrimed: Boolean(partial.audioPrimed),
     autoplayBlocked: Boolean(partial.autoplayBlocked),
     errors: Array.isArray(partial.errors) ? partial.errors.slice(0, 8) : [],
     transportStatus: partial.transportStatus || TRANSPORT_STOPPED,
@@ -3821,6 +3822,24 @@ async function ensureLayerLoaded(slot, layer, desiredPositionSec) {
   slot.sourceKey = sourceKey;
   slot.lastCycle = layer.runtime.cycle;
 }
+function loadLayerForPlayback(slot, layer, desiredPositionSec) {
+  if (layer.sourceType === "playlist") {
+    slot.player.loadPlaylist({
+      listType: "playlist",
+      list: layer.sourceId,
+      index: layer.runtime.playlistIndex,
+      startSeconds: desiredPositionSec
+    });
+    slot.playlistIndex = layer.runtime.playlistIndex;
+  } else {
+    slot.player.loadVideoById({
+      videoId: layer.sourceId,
+      startSeconds: desiredPositionSec
+    });
+  }
+  slot.sourceKey = desiredSourceKey(layer);
+  slot.lastCycle = layer.runtime.cycle;
+}
 async function seekIfNeeded(slot, desiredPositionSec) {
   const snapshot = await getPlayerSnapshot(slot);
   if (Math.abs(snapshot.currentTime - desiredPositionSec) > SEEK_TOLERANCE_SEC) {
@@ -3838,12 +3857,20 @@ async function schedulePlayback(slot, layer) {
   slot.scheduledPlayHandle = window.setTimeout(async () => {
     const position = computeLayerPosition(layer, safeNow());
     try {
-      await seekIfNeeded(slot, position);
-      slot.player.playVideo();
+      loadLayerForPlayback(slot, layer, position);
       await publishClientStatus({
         autoplayBlocked: false,
-        lastAction: `playVideo() called for ${layer.title}`
+        lastAction: `loadVideoById() called for ${layer.title}`
       });
+      await wait(800);
+      const snapshot = await getPlayerSnapshot(slot);
+      if (window.YT?.PlayerState?.PLAYING !== snapshot.playerState) {
+        slot.player.playVideo();
+        await publishClientStatus({
+          autoplayBlocked: false,
+          lastAction: `Fallback playVideo() called for ${layer.title}`
+        });
+      }
     } catch {
     }
   }, delay);
@@ -3859,15 +3886,15 @@ async function primeLocalAudio(roomStateOverride = null) {
   for (const layer of primeState.layers) {
     const slot = await getSlot(layer.id);
     const desiredPositionSec = Math.max(0, layer.startSeconds || 0);
-    await ensureLayerLoaded(slot, layer, desiredPositionSec);
+    loadLayerForPlayback(slot, layer, desiredPositionSec);
     try {
       slot.player.setVolume(0);
-      slot.player.playVideo();
       await wait(250);
       slot.player.pauseVideo();
       slot.player.seekTo(desiredPositionSec, true);
       slot.player.setVolume(clamp(primeState.transport.masterVolume * layer.volume / 100, 0, 100));
       await publishClientStatus({
+        audioPrimed: true,
         autoplayBlocked: false,
         slotCount: slots.size,
         lastAction: `Primed audio for ${layer.title}`
@@ -3916,6 +3943,7 @@ async function applyRoomState(roomState) {
     engineReady: true,
     backgroundConnected: true,
     youtubeApiReady: Boolean(window.YT?.Player),
+    audioPrimed: statusState.audioPrimed,
     autoplayBlocked: statusState.autoplayBlocked,
     errors: statusState.errors,
     transportStatus: currentRoomState.transport.status,
@@ -4009,6 +4037,7 @@ async function handleAutoplayBlocked(layerId) {
   const message = `Autoplay was blocked for layer ${layerId}. Open the extension panel and retry audio on this browser.`;
   await publishClientStatus({
     ...statusState,
+    audioPrimed: false,
     autoplayBlocked: true,
     errors: [...statusState.errors || [], message].slice(-8),
     lastAction: `Autoplay blocked for ${layerId}`
@@ -4034,6 +4063,7 @@ async function retryLocalAudio() {
   await publishClientStatus({
     ...statusState,
     autoplayBlocked: false,
+    audioPrimed: true,
     lastAction: "Manual retry requested"
   });
 }
@@ -4114,6 +4144,7 @@ lib_default.onReady(async () => {
     engineReady: true,
     backgroundConnected: true,
     youtubeApiReady: Boolean(window.YT?.Player),
+    audioPrimed: statusState.audioPrimed,
     slotCount: slots.size,
     lastAction: "Background engine initialized"
   });

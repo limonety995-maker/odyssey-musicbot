@@ -4060,11 +4060,15 @@ function renderStatusPanel() {
     <section class="panel">
       <h2>Playback status on this browser</h2>
       <p class="muted">Transport: ${escapeHtml(localStatus.transportStatus || TRANSPORT_STOPPED)}</p>
+      <p class="muted">Audio unlock: ${escapeHtml(localStatus.audioPrimed ? "done" : "needed")}</p>
       <p class="muted">Engine: ${escapeHtml(localStatus.engineReady ? "ready" : "starting")} \u2022 YouTube API: ${escapeHtml(localStatus.youtubeApiReady ? "ready" : "not ready")} \u2022 Slots: ${escapeHtml(String(localStatus.slotCount || 0))}</p>
       ${localStatus.lastAction ? `<p class="muted">Last action: ${escapeHtml(localStatus.lastAction)}</p>` : ""}
       <div class="button-row">
-        <button class="action-button secondary-button" data-action="unlock-audio">Enable audio here</button>
+        <button class="action-button secondary-button" data-action="unlock-audio">${escapeHtml(localStatus.audioPrimed ? "Audio unlocked" : "Enable audio here")}</button>
         ${localStatus.autoplayBlocked ? `<button class="action-button secondary-button" data-action="retry-audio">Retry audio here</button>` : ""}
+      </div>
+      <div class="warning-box">
+        <p>\u042D\u0442\u0430 \u043A\u043D\u043E\u043F\u043A\u0430 \u0442\u043E\u043B\u044C\u043A\u043E \u0440\u0430\u0437\u0431\u043B\u043E\u043A\u0438\u0440\u0443\u0435\u0442 \u0437\u0432\u0443\u043A \u0432 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435. \u041E\u043D\u0430 \u043D\u0435 \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0435\u0442 \u0442\u0440\u0435\u043A \u0441\u0430\u043C\u0430. \u041F\u043E\u0441\u043B\u0435 \u043D\u0435\u0451 \u043D\u0443\u0436\u043D\u043E \u043D\u0430\u0436\u0430\u0442\u044C Play \u0432 \u0431\u043B\u043E\u043A\u0435 Transport.</p>
       </div>
       ${localStatus.autoplayBlocked ? `<div class="warning-box">
             <p>Autoplay is blocked on this browser. Press the button above once, then try Play again.</p>

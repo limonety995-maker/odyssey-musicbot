@@ -464,15 +464,19 @@ function renderStatusPanel() {
     <section class="panel">
       <h2>Playback status on this browser</h2>
       <p class="muted">Transport: ${escapeHtml(localStatus.transportStatus || TRANSPORT_STOPPED)}</p>
+      <p class="muted">Audio unlock: ${escapeHtml(localStatus.audioPrimed ? "done" : "needed")}</p>
       <p class="muted">Engine: ${escapeHtml(localStatus.engineReady ? "ready" : "starting")} • YouTube API: ${escapeHtml(localStatus.youtubeApiReady ? "ready" : "not ready")} • Slots: ${escapeHtml(String(localStatus.slotCount || 0))}</p>
       ${localStatus.lastAction
         ? `<p class="muted">Last action: ${escapeHtml(localStatus.lastAction)}</p>`
         : ""}
       <div class="button-row">
-        <button class="action-button secondary-button" data-action="unlock-audio">Enable audio here</button>
+        <button class="action-button secondary-button" data-action="unlock-audio">${escapeHtml(localStatus.audioPrimed ? "Audio unlocked" : "Enable audio here")}</button>
         ${localStatus.autoplayBlocked
           ? `<button class="action-button secondary-button" data-action="retry-audio">Retry audio here</button>`
           : ""}
+      </div>
+      <div class="warning-box">
+        <p>Эта кнопка только разблокирует звук в браузере. Она не запускает трек сама. После неё нужно нажать Play в блоке Transport.</p>
       </div>
       ${localStatus.autoplayBlocked
         ? `<div class="warning-box">
