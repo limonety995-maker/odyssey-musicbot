@@ -136,16 +136,10 @@ helper/data/library.json
 2. соберёт extension;
 3. опубликует содержимое `dist/extension` на GitHub Pages.
 
-Итоговый manifest URL будет такого вида:
+Для этого репозитория итоговый manifest URL будет:
 
 ```text
-https://USERNAME.github.io/REPOSITORY_NAME/manifest.json
-```
-
-Например, если репозиторий называется `owlbear-sync-music`, то Owlbear нужно будет установить по ссылке:
-
-```text
-https://USERNAME.github.io/owlbear-sync-music/manifest.json
+https://limonety995-maker.github.io/odyssey-musicbot/manifest.json
 ```
 
 ### 5. Подключить extension в Owlbear Rodeo

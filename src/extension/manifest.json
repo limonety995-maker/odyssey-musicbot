@@ -3,16 +3,17 @@
   "version": "0.1.0",
   "manifest_version": 1,
   "author": "Codex",
-  "icon": "icon.svg",
+  "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg",
   "description": "GM-controlled synchronized YouTube music layers for Owlbear Rodeo.",
+  "homepage_url": "https://github.com/limonety995-maker/odyssey-musicbot",
   "action": {
     "title": "Sync Music",
-    "icon": "icon.svg",
-    "popover": "index.html",
+    "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg",
+    "popover": "https://limonety995-maker.github.io/odyssey-musicbot/index.html",
     "width": 440,
     "height": 720
   },
-  "background_url": "background.html",
+  "background_url": "https://limonety995-maker.github.io/odyssey-musicbot/background.html",
   "permissions": [
     {
       "name": "autoplay",
