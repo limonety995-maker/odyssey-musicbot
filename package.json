@@ -1,0 +1,17 @@
+{
+  "name": "owlbear-sync-music",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:watch": "node build.mjs --watch",
+    "helper": "node helper/server.js"
+  },
+  "dependencies": {
+    "@owlbear-rodeo/sdk": "3.1.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}

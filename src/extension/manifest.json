@@ -1,0 +1,22 @@
+{
+  "name": "Sync Music MVP",
+  "version": "0.1.0",
+  "manifest_version": 1,
+  "author": "Codex",
+  "icon": "icon.svg",
+  "description": "GM-controlled synchronized YouTube music layers for Owlbear Rodeo.",
+  "action": {
+    "title": "Sync Music",
+    "icon": "icon.svg",
+    "popover": "index.html",
+    "width": 440,
+    "height": 720
+  },
+  "background_url": "background.html",
+  "permissions": [
+    {
+      "name": "autoplay",
+      "reason": "Needed so the extension can start synchronized music for all players."
+    }
+  ]
+}
