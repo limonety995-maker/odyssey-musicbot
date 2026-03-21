@@ -3521,6 +3521,7 @@ var CLIENT_STATUS_KEY = `${EXTENSION_ID}/client-status`;
 var BROADCAST_CHANNEL = `${EXTENSION_ID}/room-state`;
 var LOCAL_CONTROL_CHANNEL = `${EXTENSION_ID}/local-control`;
 var HELPER_URL_STORAGE_KEY = `${EXTENSION_ID}/helper-url`;
+var LOCAL_OUTPUT_VOLUME_KEY = `${EXTENSION_ID}/local-output-volume`;
 var TRANSPORT_PLAYING = "playing";
 var TRANSPORT_PAUSED = "paused";
 var TRANSPORT_STOPPED = "stopped";
@@ -3554,6 +3555,26 @@ function getHelperUrl() {
 function setHelperUrl(url) {
   try {
     localStorage.setItem(HELPER_URL_STORAGE_KEY, url || DEFAULT_HELPER_URL);
+  } catch {
+  }
+}
+function getLocalOutputVolume() {
+  try {
+    return clamp(
+      toNumber(localStorage.getItem(LOCAL_OUTPUT_VOLUME_KEY), 100),
+      0,
+      100
+    );
+  } catch {
+    return 100;
+  }
+}
+function setLocalOutputVolume(volume) {
+  try {
+    localStorage.setItem(
+      LOCAL_OUTPUT_VOLUME_KEY,
+      String(clamp(toNumber(volume, 100), 0, 100))
+    );
   } catch {
   }
 }
@@ -3685,6 +3706,7 @@ var state = {
     sceneName: ""
   },
   localClientStatus: null,
+  localOutputVolume: getLocalOutputVolume(),
   lastError: ""
 };
 function escapeHtml(value) {
@@ -3692,6 +3714,10 @@ function escapeHtml(value) {
 }
 function isGm() {
   return state.role === "GM";
+}
+function normalizeVolumeValue(value, fallback = 100) {
+  const numeric = Number(value);
+  return clamp(Number.isFinite(numeric) ? numeric : fallback, 0, 100);
 }
 function setBusy(value) {
   state.busy = value;
@@ -3746,6 +3772,11 @@ async function refreshRoomState() {
 async function refreshLocalClientStatus() {
   const metadata = await lib_default.player.getMetadata();
   state.localClientStatus = metadata[CLIENT_STATUS_KEY] || null;
+  state.localOutputVolume = clamp(
+    Number(state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume()),
+    0,
+    100
+  );
 }
 async function pushRoomState(nextState) {
   const normalized = ensureRoomState(nextState);
@@ -4004,6 +4035,24 @@ async function unlockLocalAudio() {
     },
     { destination: "LOCAL" }
   );
+  if (state.roomState.transport.status === TRANSPORT_PLAYING) {
+    await retryLocalAudio();
+  }
+}
+function syncLocalOutputVolume(volume) {
+  state.localOutputVolume = normalizeVolumeValue(volume);
+  setLocalOutputVolume(state.localOutputVolume);
+}
+async function handleLocalOutputVolume(volume) {
+  syncLocalOutputVolume(volume);
+  await lib_default.broadcast.sendMessage(
+    LOCAL_CONTROL_CHANNEL,
+    {
+      type: "set-local-volume",
+      volume: state.localOutputVolume
+    },
+    { destination: "LOCAL" }
+  );
 }
 function renderHeader() {
   const helperClass = state.helperOnline ? "pill success" : "pill warning";
@@ -4043,7 +4092,7 @@ function renderHelperPanel() {
     </section>
   `;
 }
-function renderStatusPanel() {
+function renderBrowserStatusPanel() {
   const localStatus = state.localClientStatus;
   if (!localStatus) {
     return `
@@ -4061,20 +4110,41 @@ function renderStatusPanel() {
       <h2>Playback status on this browser</h2>
       <p class="muted">Transport: ${escapeHtml(localStatus.transportStatus || TRANSPORT_STOPPED)}</p>
       <p class="muted">Audio unlock: ${escapeHtml(localStatus.audioPrimed ? "done" : "needed")}</p>
-      <p class="muted">Engine: ${escapeHtml(localStatus.engineReady ? "ready" : "starting")} \u2022 YouTube API: ${escapeHtml(localStatus.youtubeApiReady ? "ready" : "not ready")} \u2022 Slots: ${escapeHtml(String(localStatus.slotCount || 0))}</p>
+      <p class="muted">Engine: ${escapeHtml(localStatus.engineReady ? "ready" : "starting")} | YouTube API: ${escapeHtml(localStatus.youtubeApiReady ? "ready" : "not ready")} | Slots: ${escapeHtml(String(localStatus.slotCount || 0))}</p>
       ${localStatus.lastAction ? `<p class="muted">Last action: ${escapeHtml(localStatus.lastAction)}</p>` : ""}
+      <label class="field-label" for="local-output-volume">Volume on this browser</label>
+      <div class="range-row">
+        <input
+          id="local-output-volume"
+          name="localOutputVolume"
+          data-range="local-output-volume"
+          type="range"
+          min="0"
+          max="100"
+          value="${state.localOutputVolume}"
+        />
+        <span>${state.localOutputVolume}%</span>
+      </div>
       <div class="button-row">
         <button class="action-button secondary-button" data-action="unlock-audio">${escapeHtml(localStatus.audioPrimed ? "Audio unlocked" : "Enable audio here")}</button>
         ${localStatus.autoplayBlocked ? `<button class="action-button secondary-button" data-action="retry-audio">Retry audio here</button>` : ""}
       </div>
       <div class="warning-box">
-        <p>\u042D\u0442\u0430 \u043A\u043D\u043E\u043F\u043A\u0430 \u0442\u043E\u043B\u044C\u043A\u043E \u0440\u0430\u0437\u0431\u043B\u043E\u043A\u0438\u0440\u0443\u0435\u0442 \u0437\u0432\u0443\u043A \u0432 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435. \u041E\u043D\u0430 \u043D\u0435 \u0437\u0430\u043F\u0443\u0441\u043A\u0430\u0435\u0442 \u0442\u0440\u0435\u043A \u0441\u0430\u043C\u0430. \u041F\u043E\u0441\u043B\u0435 \u043D\u0435\u0451 \u043D\u0443\u0436\u043D\u043E \u043D\u0430\u0436\u0430\u0442\u044C Play \u0432 \u0431\u043B\u043E\u043A\u0435 Transport.</p>
+        <p>This button only unlocks audio in this browser. It does not start a stopped mix by itself. After that, the GM still needs to press Play in Transport.</p>
       </div>
       ${localStatus.autoplayBlocked ? `<div class="warning-box">
             <p>Autoplay is blocked on this browser. Press the button above once, then try Play again.</p>
           </div>` : ""}
       ${Array.isArray(localStatus.errors) && localStatus.errors.length ? `<div class="warning-box">${localStatus.errors.map((entry) => `<p>${escapeHtml(entry)}</p>`).join("")}</div>` : ""}
     </section>
+  `;
+}
+function renderLoadingState() {
+  return `
+    <div class="loading-state">
+      <div class="spinner"></div>
+      <p>Loading Sync Music MVP...</p>
+    </div>
   `;
 }
 function renderTransportPanel() {
@@ -4201,6 +4271,7 @@ function renderLimitationsPanel() {
       <ul class="plain-list">
         <li>YouTube playback works through the official IFrame API.</li>
         <li>YouTube Music works when the helper can resolve the link to a normal YouTube video or playlist ID.</li>
+        <li>YouTube ads on embedded videos are controlled by YouTube. This extension reduces unnecessary reloads, but it cannot force ad-free playback.</li>
         <li>If a video forbids embeds, YouTube will return error 101 or 150 and this browser will show a warning.</li>
         <li>If autoplay is blocked, each affected browser needs one click in this panel to retry audio locally.</li>
       </ul>
@@ -4209,6 +4280,10 @@ function renderLimitationsPanel() {
 }
 function render() {
   if (!root) {
+    return;
+  }
+  if (state.loading) {
+    root.innerHTML = renderLoadingState();
     return;
   }
   if (state.loading) {
@@ -4225,7 +4300,7 @@ function render() {
       ${renderHeader()}
       ${state.lastError ? `<section class="panel error-box"><p>${escapeHtml(state.lastError)}</p></section>` : ""}
       ${renderHelperPanel()}
-      ${renderStatusPanel()}
+      ${renderBrowserStatusPanel()}
       ${renderTransportPanel()}
       ${renderAddTrackPanel()}
       ${renderActiveLayers()}
@@ -4254,6 +4329,11 @@ root?.addEventListener("input", (event) => {
   }
   if (target.name === "draftSceneName") {
     state.draft.sceneName = target.value;
+    return;
+  }
+  if (target.name === "localOutputVolume") {
+    syncLocalOutputVolume(target.value);
+    render();
   }
 });
 root?.addEventListener("change", async (event) => {
@@ -4268,6 +4348,10 @@ root?.addEventListener("change", async (event) => {
     }
     if (target.dataset.range === "master-volume") {
       await handleMasterVolume(target.value);
+      return;
+    }
+    if (target.dataset.range === "local-output-volume") {
+      await handleLocalOutputVolume(target.value);
       return;
     }
     if (target.dataset.toggle === "layer-loop" && target.dataset.layerId) {
@@ -4348,6 +4432,11 @@ lib_default.onReady(async () => {
   lib_default.player.onChange((player) => {
     state.role = player.role;
     state.localClientStatus = player.metadata?.[CLIENT_STATUS_KEY] || null;
+    state.localOutputVolume = clamp(
+      Number(state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume()),
+      0,
+      100
+    );
     render();
   });
   lib_default.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {

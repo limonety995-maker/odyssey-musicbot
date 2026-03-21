@@ -15,7 +15,9 @@ import {
   createEmptyRoomState,
   deepClone,
   ensureRoomState,
+  getLocalOutputVolume,
   safeNow,
+  setLocalOutputVolume,
 } from "./shared.js";
 
 const playerHost = document.getElementById("youtube-player-host");
@@ -27,6 +29,7 @@ let syncIntervalHandle = null;
 let statusState = createClientStatus();
 let writeInFlight = false;
 let youtubeApiPromise = null;
+let localOutputVolume = getLocalOutputVolume();
 
 const slots = new Map();
 
@@ -87,6 +90,7 @@ function wait(ms) {
 async function publishClientStatus(patch = {}) {
   statusState = createClientStatus({
     ...statusState,
+    localOutputVolume,
     ...patch,
   });
   await OBR.player.setMetadata({
@@ -123,6 +127,43 @@ function desiredSourceKey(layer) {
   return `${layer.sourceType}:${layer.sourceId}`;
 }
 
+function buildPlaybackPlanKey(layer) {
+  return [
+    desiredSourceKey(layer),
+    Math.max(0, Number(layer.runtime?.cycle) || 0),
+    Math.max(0, Number(layer.runtime?.playlistIndex) || 0),
+    Math.max(0, Number(layer.runtime?.playingSince) || 0),
+    Math.round(Math.max(0, Number(layer.runtime?.pauseOffsetSec) || 0) * 1000),
+  ].join("|");
+}
+
+function shouldReloadLayer(slot, layer) {
+  return slot.sourceKey !== desiredSourceKey(layer)
+    || slot.lastCycle !== layer.runtime.cycle
+    || (layer.sourceType === "playlist" && slot.playlistIndex !== layer.runtime.playlistIndex);
+}
+
+function computeEffectiveVolume(transport, layer) {
+  return clamp(
+    (transport.masterVolume * layer.volume * localOutputVolume) / 10000,
+    0,
+    100,
+  );
+}
+
+function applyLayerVolume(slot, transport, layer) {
+  slot.player.setVolume(computeEffectiveVolume(transport, layer));
+}
+
+function isPlayingState(playerState) {
+  return playerState === window.YT?.PlayerState?.PLAYING;
+}
+
+function normalizeVolumeValue(value, fallback = 100) {
+  const numeric = Number(value);
+  return clamp(Number.isFinite(numeric) ? numeric : fallback, 0, 100);
+}
+
 async function createSlot(layerId) {
   const host = document.createElement("div");
   host.className = "youtube-player-slot";
@@ -137,6 +178,7 @@ async function createSlot(layerId) {
     sourceKey: "",
     playlistIndex: 0,
     lastCycle: 0,
+    playPlanKey: "",
     scheduledPlayHandle: 0,
   };
 
@@ -209,9 +251,7 @@ async function ensureLayerLoaded(slot, layer, desiredPositionSec) {
   await slot.readyPromise;
   const player = slot.player;
   const sourceKey = desiredSourceKey(layer);
-  const needsReload = slot.sourceKey !== sourceKey
-    || slot.lastCycle !== layer.runtime.cycle
-    || (layer.sourceType === "playlist" && slot.playlistIndex !== layer.runtime.playlistIndex);
+  const needsReload = shouldReloadLayer(slot, layer);
 
   if (!needsReload) {
     return;
@@ -264,7 +304,13 @@ async function seekIfNeeded(slot, desiredPositionSec) {
 }
 
 async function schedulePlayback(slot, layer) {
+  const planKey = buildPlaybackPlanKey(layer);
+  if (slot.playPlanKey === planKey && slot.scheduledPlayHandle) {
+    return;
+  }
+
   clearScheduledPlay(slot);
+  slot.playPlanKey = planKey;
   const startAt = layer.runtime.playingSince || safeNow();
   const now = safeNow();
   const delay = Math.max(0, startAt - now);
@@ -272,16 +318,18 @@ async function schedulePlayback(slot, layer) {
     lastAction: `Scheduled play for ${layer.title} in ${delay}ms`,
   });
   slot.scheduledPlayHandle = window.setTimeout(async () => {
+    slot.scheduledPlayHandle = 0;
     const position = computeLayerPosition(layer, safeNow());
     try {
       loadLayerForPlayback(slot, layer, position);
+      applyLayerVolume(slot, currentRoomState.transport, layer);
       await publishClientStatus({
         autoplayBlocked: false,
         lastAction: `loadVideoById() called for ${layer.title}`,
       });
       await wait(800);
       const snapshot = await getPlayerSnapshot(slot);
-      if (window.YT?.PlayerState?.PLAYING !== snapshot.playerState) {
+      if (!isPlayingState(snapshot.playerState)) {
         slot.player.playVideo();
         await publishClientStatus({
           autoplayBlocked: false,
@@ -305,14 +353,14 @@ async function primeLocalAudio(roomStateOverride = null) {
 
   for (const layer of primeState.layers) {
     const slot = await getSlot(layer.id);
-    const desiredPositionSec = Math.max(0, layer.startSeconds || 0);
+    const desiredPositionSec = computeLayerPosition(layer, safeNow());
     loadLayerForPlayback(slot, layer, desiredPositionSec);
     try {
       slot.player.setVolume(0);
       await wait(250);
       slot.player.pauseVideo();
       slot.player.seekTo(desiredPositionSec, true);
-      slot.player.setVolume(clamp((primeState.transport.masterVolume * layer.volume) / 100, 0, 100));
+      applyLayerVolume(slot, primeState.transport, layer);
       await publishClientStatus({
         audioPrimed: true,
         autoplayBlocked: false,
@@ -329,14 +377,14 @@ async function applyLayerState(layer, transport) {
   const slot = await getSlot(layer.id);
   await slot.readyPromise;
 
-  const effectiveVolume = clamp((transport.masterVolume * layer.volume) / 100, 0, 100);
-  slot.player.setVolume(effectiveVolume);
-
   const desiredPositionSec = computeLayerPosition(layer, safeNow());
+  const needsReload = shouldReloadLayer(slot, layer);
   await ensureLayerLoaded(slot, layer, desiredPositionSec);
+  applyLayerVolume(slot, transport, layer);
 
   if (transport.status === TRANSPORT_STOPPED || layer.runtime.status === TRANSPORT_STOPPED) {
     clearScheduledPlay(slot);
+    slot.playPlanKey = "";
     slot.player.stopVideo();
     try {
       slot.player.seekTo(layer.startSeconds, true);
@@ -348,13 +396,37 @@ async function applyLayerState(layer, transport) {
 
   if (transport.status === TRANSPORT_PAUSED || layer.runtime.status === TRANSPORT_PAUSED) {
     clearScheduledPlay(slot);
+    slot.playPlanKey = "";
     await seekIfNeeded(slot, desiredPositionSec);
     slot.player.pauseVideo();
     return;
   }
 
-  await seekIfNeeded(slot, desiredPositionSec);
-  await schedulePlayback(slot, layer);
+  const planKey = buildPlaybackPlanKey(layer);
+  if (needsReload || slot.playPlanKey !== planKey) {
+    await schedulePlayback(slot, layer);
+    return;
+  }
+
+  if (slot.scheduledPlayHandle) {
+    return;
+  }
+
+  const snapshot = await getPlayerSnapshot(slot);
+  if (isPlayingState(snapshot.playerState)) {
+    await seekIfNeeded(slot, desiredPositionSec);
+  }
+}
+
+async function applyLocalVolumeToActiveSlots() {
+  for (const layer of currentRoomState.layers) {
+    const slot = slots.get(layer.id);
+    if (!slot) {
+      continue;
+    }
+    await slot.readyPromise;
+    applyLayerVolume(slot, currentRoomState.transport, layer);
+  }
 }
 
 async function applyRoomState(roomState) {
@@ -638,6 +710,18 @@ OBR.onReady(async () => {
       primeLocalAudio(event.data?.roomState).catch(() => {
         // Ignore local prime failures.
       });
+      return;
+    }
+    if (event.data?.type === "set-local-volume") {
+      localOutputVolume = normalizeVolumeValue(event.data?.volume);
+      setLocalOutputVolume(localOutputVolume);
+      applyLocalVolumeToActiveSlots()
+        .then(() => publishClientStatus({
+          lastAction: `Local output volume set to ${localOutputVolume}%`,
+        }))
+        .catch(() => {
+          // Ignore local volume update failures.
+        });
     }
   });
 

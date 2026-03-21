@@ -16,9 +16,11 @@ import {
   deepClone,
   ensureRoomState,
   formatSourceType,
+  getLocalOutputVolume,
   getHelperUrl,
   safeNow,
   setHelperUrl,
+  setLocalOutputVolume,
   stripLayerForScene,
   summarizeTransport,
 } from "./shared.js";
@@ -41,6 +43,7 @@ const state = {
     sceneName: "",
   },
   localClientStatus: null,
+  localOutputVolume: getLocalOutputVolume(),
   lastError: "",
 };
 
@@ -54,6 +57,11 @@ function escapeHtml(value) {
 
 function isGm() {
   return state.role === "GM";
+}
+
+function normalizeVolumeValue(value, fallback = 100) {
+  const numeric = Number(value);
+  return clamp(Number.isFinite(numeric) ? numeric : fallback, 0, 100);
 }
 
 function setBusy(value) {
@@ -115,6 +123,11 @@ async function refreshRoomState() {
 async function refreshLocalClientStatus() {
   const metadata = await OBR.player.getMetadata();
   state.localClientStatus = metadata[CLIENT_STATUS_KEY] || null;
+  state.localOutputVolume = clamp(
+    Number(state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume()),
+    0,
+    100,
+  );
 }
 
 async function pushRoomState(nextState) {
@@ -402,6 +415,26 @@ async function unlockLocalAudio() {
     },
     { destination: "LOCAL" },
   );
+  if (state.roomState.transport.status === TRANSPORT_PLAYING) {
+    await retryLocalAudio();
+  }
+}
+
+function syncLocalOutputVolume(volume) {
+  state.localOutputVolume = normalizeVolumeValue(volume);
+  setLocalOutputVolume(state.localOutputVolume);
+}
+
+async function handleLocalOutputVolume(volume) {
+  syncLocalOutputVolume(volume);
+  await OBR.broadcast.sendMessage(
+    LOCAL_CONTROL_CHANNEL,
+    {
+      type: "set-local-volume",
+      volume: state.localOutputVolume,
+    },
+    { destination: "LOCAL" },
+  );
 }
 
 function renderHeader() {
@@ -487,6 +520,72 @@ function renderStatusPanel() {
         ? `<div class="warning-box">${localStatus.errors.map((entry) => `<p>${escapeHtml(entry)}</p>`).join("")}</div>`
         : ""}
     </section>
+  `;
+}
+
+function renderBrowserStatusPanel() {
+  const localStatus = state.localClientStatus;
+  if (!localStatus) {
+    return `
+      <section class="panel">
+        <h2>Playback status on this browser</h2>
+        <div class="warning-box">
+          <p>Background audio engine has not reported in yet. Reload the room once and reopen the extension.</p>
+          <button class="action-button secondary-button" data-action="unlock-audio">Enable audio here</button>
+        </div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="panel">
+      <h2>Playback status on this browser</h2>
+      <p class="muted">Transport: ${escapeHtml(localStatus.transportStatus || TRANSPORT_STOPPED)}</p>
+      <p class="muted">Audio unlock: ${escapeHtml(localStatus.audioPrimed ? "done" : "needed")}</p>
+      <p class="muted">Engine: ${escapeHtml(localStatus.engineReady ? "ready" : "starting")} | YouTube API: ${escapeHtml(localStatus.youtubeApiReady ? "ready" : "not ready")} | Slots: ${escapeHtml(String(localStatus.slotCount || 0))}</p>
+      ${localStatus.lastAction
+        ? `<p class="muted">Last action: ${escapeHtml(localStatus.lastAction)}</p>`
+        : ""}
+      <label class="field-label" for="local-output-volume">Volume on this browser</label>
+      <div class="range-row">
+        <input
+          id="local-output-volume"
+          name="localOutputVolume"
+          data-range="local-output-volume"
+          type="range"
+          min="0"
+          max="100"
+          value="${state.localOutputVolume}"
+        />
+        <span>${state.localOutputVolume}%</span>
+      </div>
+      <div class="button-row">
+        <button class="action-button secondary-button" data-action="unlock-audio">${escapeHtml(localStatus.audioPrimed ? "Audio unlocked" : "Enable audio here")}</button>
+        ${localStatus.autoplayBlocked
+          ? `<button class="action-button secondary-button" data-action="retry-audio">Retry audio here</button>`
+          : ""}
+      </div>
+      <div class="warning-box">
+        <p>This button only unlocks audio in this browser. It does not start a stopped mix by itself. After that, the GM still needs to press Play in Transport.</p>
+      </div>
+      ${localStatus.autoplayBlocked
+        ? `<div class="warning-box">
+            <p>Autoplay is blocked on this browser. Press the button above once, then try Play again.</p>
+          </div>`
+        : ""}
+      ${Array.isArray(localStatus.errors) && localStatus.errors.length
+        ? `<div class="warning-box">${localStatus.errors.map((entry) => `<p>${escapeHtml(entry)}</p>`).join("")}</div>`
+        : ""}
+    </section>
+  `;
+}
+
+function renderLoadingState() {
+  return `
+    <div class="loading-state">
+      <div class="spinner"></div>
+      <p>Loading Sync Music MVP...</p>
+    </div>
   `;
 }
 
@@ -629,6 +728,7 @@ function renderLimitationsPanel() {
       <ul class="plain-list">
         <li>YouTube playback works through the official IFrame API.</li>
         <li>YouTube Music works when the helper can resolve the link to a normal YouTube video or playlist ID.</li>
+        <li>YouTube ads on embedded videos are controlled by YouTube. This extension reduces unnecessary reloads, but it cannot force ad-free playback.</li>
         <li>If a video forbids embeds, YouTube will return error 101 or 150 and this browser will show a warning.</li>
         <li>If autoplay is blocked, each affected browser needs one click in this panel to retry audio locally.</li>
       </ul>
@@ -638,6 +738,11 @@ function renderLimitationsPanel() {
 
 function render() {
   if (!root) {
+    return;
+  }
+
+  if (state.loading) {
+    root.innerHTML = renderLoadingState();
     return;
   }
 
@@ -656,7 +761,7 @@ function render() {
       ${renderHeader()}
       ${state.lastError ? `<section class="panel error-box"><p>${escapeHtml(state.lastError)}</p></section>` : ""}
       ${renderHelperPanel()}
-      ${renderStatusPanel()}
+      ${renderBrowserStatusPanel()}
       ${renderTransportPanel()}
       ${renderAddTrackPanel()}
       ${renderActiveLayers()}
@@ -686,6 +791,11 @@ root?.addEventListener("input", (event) => {
   }
   if (target.name === "draftSceneName") {
     state.draft.sceneName = target.value;
+    return;
+  }
+  if (target.name === "localOutputVolume") {
+    syncLocalOutputVolume(target.value);
+    render();
   }
 });
 
@@ -701,6 +811,10 @@ root?.addEventListener("change", async (event) => {
     }
     if (target.dataset.range === "master-volume") {
       await handleMasterVolume(target.value);
+      return;
+    }
+    if (target.dataset.range === "local-output-volume") {
+      await handleLocalOutputVolume(target.value);
       return;
     }
     if (target.dataset.toggle === "layer-loop" && target.dataset.layerId) {
@@ -787,6 +901,11 @@ OBR.onReady(async () => {
   OBR.player.onChange((player) => {
     state.role = player.role;
     state.localClientStatus = player.metadata?.[CLIENT_STATUS_KEY] || null;
+    state.localOutputVolume = clamp(
+      Number(state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume()),
+      0,
+      100,
+    );
     render();
   });
 

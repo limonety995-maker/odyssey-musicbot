@@ -4,6 +4,7 @@ export const CLIENT_STATUS_KEY = `${EXTENSION_ID}/client-status`;
 export const BROADCAST_CHANNEL = `${EXTENSION_ID}/room-state`;
 export const LOCAL_CONTROL_CHANNEL = `${EXTENSION_ID}/local-control`;
 export const HELPER_URL_STORAGE_KEY = `${EXTENSION_ID}/helper-url`;
+export const LOCAL_OUTPUT_VOLUME_KEY = `${EXTENSION_ID}/local-output-volume`;
 
 export const TRANSPORT_PLAYING = "playing";
 export const TRANSPORT_PAUSED = "paused";
@@ -47,6 +48,29 @@ export function getHelperUrl() {
 export function setHelperUrl(url) {
   try {
     localStorage.setItem(HELPER_URL_STORAGE_KEY, url || DEFAULT_HELPER_URL);
+  } catch {
+    // Ignore localStorage failures.
+  }
+}
+
+export function getLocalOutputVolume() {
+  try {
+    return clamp(
+      toNumber(localStorage.getItem(LOCAL_OUTPUT_VOLUME_KEY), 100),
+      0,
+      100,
+    );
+  } catch {
+    return 100;
+  }
+}
+
+export function setLocalOutputVolume(volume) {
+  try {
+    localStorage.setItem(
+      LOCAL_OUTPUT_VOLUME_KEY,
+      String(clamp(toNumber(volume, 100), 0, 100)),
+    );
   } catch {
     // Ignore localStorage failures.
   }
@@ -201,6 +225,7 @@ export function createClientStatus(partial = {}) {
     youtubeApiReady: Boolean(partial.youtubeApiReady),
     audioPrimed: Boolean(partial.audioPrimed),
     autoplayBlocked: Boolean(partial.autoplayBlocked),
+    localOutputVolume: clamp(toNumber(partial.localOutputVolume, 100), 0, 100),
     errors: Array.isArray(partial.errors) ? partial.errors.slice(0, 8) : [],
     transportStatus: partial.transportStatus || TRANSPORT_STOPPED,
     slotCount: Math.max(0, toNumber(partial.slotCount, 0)),
