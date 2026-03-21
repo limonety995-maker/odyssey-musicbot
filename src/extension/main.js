@@ -122,11 +122,23 @@ async function refreshRoomState() {
 
 async function refreshLocalClientStatus() {
   const metadata = await OBR.player.getMetadata();
-  state.localClientStatus = metadata[CLIENT_STATUS_KEY] || null;
+  if (metadata[CLIENT_STATUS_KEY]) {
+    state.localClientStatus = metadata[CLIENT_STATUS_KEY];
+  }
   state.localOutputVolume = clamp(
     Number(state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume()),
     0,
     100,
+  );
+}
+
+function syncLocalStatusFromPlayer(player) {
+  const nextStatus = player?.metadata?.[CLIENT_STATUS_KEY];
+  if (nextStatus) {
+    state.localClientStatus = nextStatus;
+  }
+  state.localOutputVolume = normalizeVolumeValue(
+    state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume(),
   );
 }
 
@@ -900,12 +912,7 @@ OBR.onReady(async () => {
 
   OBR.player.onChange((player) => {
     state.role = player.role;
-    state.localClientStatus = player.metadata?.[CLIENT_STATUS_KEY] || null;
-    state.localOutputVolume = clamp(
-      Number(state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume()),
-      0,
-      100,
-    );
+    syncLocalStatusFromPlayer(player);
     render();
   });
 

@@ -3900,6 +3900,30 @@ async function seekIfNeeded(slot, desiredPositionSec) {
     slot.player.seekTo(desiredPositionSec, true);
   }
 }
+async function startLayerPlayback(slot, layer, reason = "Playback start") {
+  const desiredPositionSec = computeLayerPosition(layer, safeNow());
+  const needsReload = shouldReloadLayer(slot, layer);
+  if (needsReload) {
+    loadLayerForPlayback(slot, layer, desiredPositionSec);
+  } else {
+    await seekIfNeeded(slot, desiredPositionSec);
+  }
+  applyLayerVolume(slot, currentRoomState.transport, layer);
+  slot.player.playVideo();
+  await publishClientStatus({
+    autoplayBlocked: false,
+    lastAction: `${reason} for ${layer.title}`
+  });
+  await wait(400);
+  const snapshot = await getPlayerSnapshot(slot);
+  if (!isPlayingState(snapshot.playerState)) {
+    slot.player.playVideo();
+    await publishClientStatus({
+      autoplayBlocked: false,
+      lastAction: `Fallback playVideo() called for ${layer.title}`
+    });
+  }
+}
 async function schedulePlayback(slot, layer) {
   const planKey = buildPlaybackPlanKey(layer);
   if (slot.playPlanKey === planKey && slot.scheduledPlayHandle) {
@@ -3913,25 +3937,14 @@ async function schedulePlayback(slot, layer) {
   await publishClientStatus({
     lastAction: `Scheduled play for ${layer.title} in ${delay}ms`
   });
+  if (delay <= 75) {
+    await startLayerPlayback(slot, layer, "Immediate play");
+    return;
+  }
   slot.scheduledPlayHandle = window.setTimeout(async () => {
     slot.scheduledPlayHandle = 0;
-    const position = computeLayerPosition(layer, safeNow());
     try {
-      loadLayerForPlayback(slot, layer, position);
-      applyLayerVolume(slot, currentRoomState.transport, layer);
-      await publishClientStatus({
-        autoplayBlocked: false,
-        lastAction: `loadVideoById() called for ${layer.title}`
-      });
-      await wait(800);
-      const snapshot = await getPlayerSnapshot(slot);
-      if (!isPlayingState(snapshot.playerState)) {
-        slot.player.playVideo();
-        await publishClientStatus({
-          autoplayBlocked: false,
-          lastAction: `Fallback playVideo() called for ${layer.title}`
-        });
-      }
+      await startLayerPlayback(slot, layer, "Scheduled play");
     } catch {
     }
   }, delay);
@@ -4141,7 +4154,8 @@ async function retryLocalAudio() {
       continue;
     }
     clearScheduledPlay(slot);
-    await schedulePlayback(slot, layer);
+    slot.playPlanKey = "";
+    await startLayerPlayback(slot, layer, "Manual retry");
   }
   await publishClientStatus({
     ...statusState,
@@ -4259,9 +4273,7 @@ lib_default.onReady(async () => {
     if (event.data?.type === "set-local-volume") {
       localOutputVolume = normalizeVolumeValue(event.data?.volume);
       setLocalOutputVolume(localOutputVolume);
-      applyLocalVolumeToActiveSlots().then(() => publishClientStatus({
-        lastAction: `Local output volume set to ${localOutputVolume}%`
-      })).catch(() => {
+      applyLocalVolumeToActiveSlots().then(() => publishClientStatus({})).catch(() => {
       });
     }
   });
