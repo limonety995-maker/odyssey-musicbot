@@ -1,0 +1,23 @@
+{
+  "name": "Sync Music MVP",
+  "version": "0.1.0",
+  "manifest_version": 1,
+  "author": "Codex",
+  "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg",
+  "description": "GM-controlled synchronized YouTube music layers for Owlbear Rodeo.",
+  "homepage_url": "https://github.com/limonety995-maker/odyssey-musicbot",
+  "action": {
+    "title": "Sync Music",
+    "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg",
+    "popover": "https://limonety995-maker.github.io/odyssey-musicbot/index.html",
+    "width": 440,
+    "height": 720
+  },
+  "background_url": "https://limonety995-maker.github.io/odyssey-musicbot/background.html",
+  "permissions": [
+    {
+      "name": "autoplay",
+      "reason": "Needed so the extension can start synchronized music for all players."
+    }
+  ]
+}
