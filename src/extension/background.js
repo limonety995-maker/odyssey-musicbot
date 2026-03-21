@@ -38,6 +38,12 @@ function updateBackgroundStatus(text) {
 
 function loadYouTubeApi() {
   if (window.YT?.Player) {
+    publishClientStatus({
+      youtubeApiReady: true,
+      lastAction: "YouTube API already loaded",
+    }).catch(() => {
+      // Ignore metadata update failures.
+    });
     return Promise.resolve(window.YT);
   }
   if (youtubeApiPromise) {
@@ -56,6 +62,12 @@ function loadYouTubeApi() {
     const previous = window.onYouTubeIframeAPIReady;
     window.onYouTubeIframeAPIReady = () => {
       previous?.();
+      publishClientStatus({
+        youtubeApiReady: true,
+        lastAction: "YouTube API ready",
+      }).catch(() => {
+        // Ignore metadata update failures.
+      });
       resolve(window.YT);
     };
   });
@@ -66,6 +78,10 @@ function notifyLocal(message, variant = "INFO") {
   OBR.notification.show(message, variant).catch(() => {
     // Ignore notification failures.
   });
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 async function publishClientStatus(patch = {}) {
@@ -151,6 +167,12 @@ async function createSlot(layerId) {
   })();
 
   slots.set(layerId, slot);
+  publishClientStatus({
+    slotCount: slots.size,
+    lastAction: `Created slot for ${layerId}`,
+  }).catch(() => {
+    // Ignore metadata update failures.
+  });
   return slot;
 }
 
@@ -177,6 +199,10 @@ async function destroySlot(layerId) {
   }
   slot.host.remove();
   slots.delete(layerId);
+  await publishClientStatus({
+    slotCount: slots.size,
+    lastAction: `Removed slot for ${layerId}`,
+  });
 }
 
 async function ensureLayerLoaded(slot, layer, desiredPositionSec) {
@@ -222,15 +248,53 @@ async function schedulePlayback(slot, layer) {
   const startAt = layer.runtime.playingSince || safeNow();
   const now = safeNow();
   const delay = Math.max(0, startAt - now);
+  await publishClientStatus({
+    lastAction: `Scheduled play for ${layer.title} in ${delay}ms`,
+  });
   slot.scheduledPlayHandle = window.setTimeout(async () => {
     const position = computeLayerPosition(layer, safeNow());
     try {
       await seekIfNeeded(slot, position);
       slot.player.playVideo();
+      await publishClientStatus({
+        autoplayBlocked: false,
+        lastAction: `playVideo() called for ${layer.title}`,
+      });
     } catch {
       // Ignore playback errors here. The player error handler will surface them.
     }
   }, delay);
+}
+
+async function primeLocalAudio(roomStateOverride = null) {
+  const primeState = ensureRoomState(roomStateOverride || currentRoomState);
+  if (!primeState.layers.length) {
+    await publishClientStatus({
+      lastAction: "Prime requested, but there are no queued layers",
+    });
+    return;
+  }
+
+  for (const layer of primeState.layers) {
+    const slot = await getSlot(layer.id);
+    const desiredPositionSec = Math.max(0, layer.startSeconds || 0);
+    await ensureLayerLoaded(slot, layer, desiredPositionSec);
+    try {
+      slot.player.setVolume(0);
+      slot.player.playVideo();
+      await wait(250);
+      slot.player.pauseVideo();
+      slot.player.seekTo(desiredPositionSec, true);
+      slot.player.setVolume(clamp((primeState.transport.masterVolume * layer.volume) / 100, 0, 100));
+      await publishClientStatus({
+        autoplayBlocked: false,
+        slotCount: slots.size,
+        lastAction: `Primed audio for ${layer.title}`,
+      });
+    } catch {
+      // Errors are surfaced via YouTube callbacks.
+    }
+  }
 }
 
 async function applyLayerState(layer, transport) {
@@ -280,9 +344,14 @@ async function applyRoomState(roomState) {
   }
 
   await publishClientStatus({
+    engineReady: true,
+    backgroundConnected: true,
+    youtubeApiReady: Boolean(window.YT?.Player),
     autoplayBlocked: statusState.autoplayBlocked,
     errors: statusState.errors,
     transportStatus: currentRoomState.transport.status,
+    slotCount: slots.size,
+    lastAction: `Applied room state revision ${currentRoomState.revision}`,
     activeLayerTitles: currentRoomState.layers.map((layer) => layer.title),
   });
 
@@ -378,6 +447,7 @@ async function handlePlayerError(layerId, code) {
   await publishClientStatus({
     ...statusState,
     errors: nextErrors,
+    lastAction: `YouTube error ${code} for ${layerId}`,
   });
   notifyLocal(message, "WARNING");
 }
@@ -388,6 +458,7 @@ async function handleAutoplayBlocked(layerId) {
     ...statusState,
     autoplayBlocked: true,
     errors: [...(statusState.errors || []), message].slice(-8),
+    lastAction: `Autoplay blocked for ${layerId}`,
   });
   notifyLocal(message, "WARNING");
 }
@@ -411,6 +482,7 @@ async function retryLocalAudio() {
   await publishClientStatus({
     ...statusState,
     autoplayBlocked: false,
+    lastAction: "Manual retry requested",
   });
 }
 
@@ -497,6 +569,13 @@ function resetSyncLoop() {
 
 OBR.onReady(async () => {
   isGm = (await OBR.player.getRole()) === "GM";
+  await publishClientStatus({
+    engineReady: true,
+    backgroundConnected: true,
+    youtubeApiReady: Boolean(window.YT?.Player),
+    slotCount: slots.size,
+    lastAction: "Background engine initialized",
+  });
   const metadata = await OBR.room.getMetadata();
   await applyRoomState(metadata[ROOM_STATE_KEY]);
   resetSyncLoop();
@@ -520,6 +599,12 @@ OBR.onReady(async () => {
     if (event.data?.type === "retry-local-audio") {
       retryLocalAudio().catch(() => {
         // Ignore local retry failures.
+      });
+      return;
+    }
+    if (event.data?.type === "prime-local-audio") {
+      primeLocalAudio(event.data?.roomState).catch(() => {
+        // Ignore local prime failures.
       });
     }
   });

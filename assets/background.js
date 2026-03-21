@@ -3624,9 +3624,14 @@ function computeLayerPosition(layer, at = safeNow()) {
 function createClientStatus(partial = {}) {
   return {
     updatedAt: safeNow(),
+    engineReady: Boolean(partial.engineReady),
+    backgroundConnected: Boolean(partial.backgroundConnected),
+    youtubeApiReady: Boolean(partial.youtubeApiReady),
     autoplayBlocked: Boolean(partial.autoplayBlocked),
     errors: Array.isArray(partial.errors) ? partial.errors.slice(0, 8) : [],
     transportStatus: partial.transportStatus || TRANSPORT_STOPPED,
+    slotCount: Math.max(0, toNumber(partial.slotCount, 0)),
+    lastAction: typeof partial.lastAction === "string" ? partial.lastAction : "",
     activeLayerTitles: Array.isArray(partial.activeLayerTitles) ? partial.activeLayerTitles.slice(0, 8) : []
   };
 }
@@ -3648,6 +3653,11 @@ function updateBackgroundStatus(text) {
 }
 function loadYouTubeApi() {
   if (window.YT?.Player) {
+    publishClientStatus({
+      youtubeApiReady: true,
+      lastAction: "YouTube API already loaded"
+    }).catch(() => {
+    });
     return Promise.resolve(window.YT);
   }
   if (youtubeApiPromise) {
@@ -3666,6 +3676,11 @@ function loadYouTubeApi() {
     const previous = window.onYouTubeIframeAPIReady;
     window.onYouTubeIframeAPIReady = () => {
       previous?.();
+      publishClientStatus({
+        youtubeApiReady: true,
+        lastAction: "YouTube API ready"
+      }).catch(() => {
+      });
       resolve(window.YT);
     };
   });
@@ -3674,6 +3689,9 @@ function loadYouTubeApi() {
 function notifyLocal(message, variant = "INFO") {
   lib_default.notification.show(message, variant).catch(() => {
   });
+}
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 async function publishClientStatus(patch = {}) {
   statusState = createClientStatus({
@@ -3745,6 +3763,11 @@ async function createSlot(layerId) {
     });
   })();
   slots.set(layerId, slot);
+  publishClientStatus({
+    slotCount: slots.size,
+    lastAction: `Created slot for ${layerId}`
+  }).catch(() => {
+  });
   return slot;
 }
 async function getSlot(layerId) {
@@ -3768,6 +3791,10 @@ async function destroySlot(layerId) {
   }
   slot.host.remove();
   slots.delete(layerId);
+  await publishClientStatus({
+    slotCount: slots.size,
+    lastAction: `Removed slot for ${layerId}`
+  });
 }
 async function ensureLayerLoaded(slot, layer, desiredPositionSec) {
   await slot.readyPromise;
@@ -3805,14 +3832,49 @@ async function schedulePlayback(slot, layer) {
   const startAt = layer.runtime.playingSince || safeNow();
   const now = safeNow();
   const delay = Math.max(0, startAt - now);
+  await publishClientStatus({
+    lastAction: `Scheduled play for ${layer.title} in ${delay}ms`
+  });
   slot.scheduledPlayHandle = window.setTimeout(async () => {
     const position = computeLayerPosition(layer, safeNow());
     try {
       await seekIfNeeded(slot, position);
       slot.player.playVideo();
+      await publishClientStatus({
+        autoplayBlocked: false,
+        lastAction: `playVideo() called for ${layer.title}`
+      });
     } catch {
     }
   }, delay);
+}
+async function primeLocalAudio(roomStateOverride = null) {
+  const primeState = ensureRoomState(roomStateOverride || currentRoomState);
+  if (!primeState.layers.length) {
+    await publishClientStatus({
+      lastAction: "Prime requested, but there are no queued layers"
+    });
+    return;
+  }
+  for (const layer of primeState.layers) {
+    const slot = await getSlot(layer.id);
+    const desiredPositionSec = Math.max(0, layer.startSeconds || 0);
+    await ensureLayerLoaded(slot, layer, desiredPositionSec);
+    try {
+      slot.player.setVolume(0);
+      slot.player.playVideo();
+      await wait(250);
+      slot.player.pauseVideo();
+      slot.player.seekTo(desiredPositionSec, true);
+      slot.player.setVolume(clamp(primeState.transport.masterVolume * layer.volume / 100, 0, 100));
+      await publishClientStatus({
+        autoplayBlocked: false,
+        slotCount: slots.size,
+        lastAction: `Primed audio for ${layer.title}`
+      });
+    } catch {
+    }
+  }
 }
 async function applyLayerState(layer, transport) {
   const slot = await getSlot(layer.id);
@@ -3851,9 +3913,14 @@ async function applyRoomState(roomState) {
     await applyLayerState(layer, currentRoomState.transport);
   }
   await publishClientStatus({
+    engineReady: true,
+    backgroundConnected: true,
+    youtubeApiReady: Boolean(window.YT?.Player),
     autoplayBlocked: statusState.autoplayBlocked,
     errors: statusState.errors,
     transportStatus: currentRoomState.transport.status,
+    slotCount: slots.size,
+    lastAction: `Applied room state revision ${currentRoomState.revision}`,
     activeLayerTitles: currentRoomState.layers.map((layer) => layer.title)
   });
   updateBackgroundStatus(
@@ -3933,7 +4000,8 @@ async function handlePlayerError(layerId, code) {
   const nextErrors = [...statusState.errors || [], message].slice(-8);
   await publishClientStatus({
     ...statusState,
-    errors: nextErrors
+    errors: nextErrors,
+    lastAction: `YouTube error ${code} for ${layerId}`
   });
   notifyLocal(message, "WARNING");
 }
@@ -3942,7 +4010,8 @@ async function handleAutoplayBlocked(layerId) {
   await publishClientStatus({
     ...statusState,
     autoplayBlocked: true,
-    errors: [...statusState.errors || [], message].slice(-8)
+    errors: [...statusState.errors || [], message].slice(-8),
+    lastAction: `Autoplay blocked for ${layerId}`
   });
   notifyLocal(message, "WARNING");
 }
@@ -3964,7 +4033,8 @@ async function retryLocalAudio() {
   }
   await publishClientStatus({
     ...statusState,
-    autoplayBlocked: false
+    autoplayBlocked: false,
+    lastAction: "Manual retry requested"
   });
 }
 async function gmPeriodicSync() {
@@ -4040,6 +4110,13 @@ function resetSyncLoop() {
 }
 lib_default.onReady(async () => {
   isGm = await lib_default.player.getRole() === "GM";
+  await publishClientStatus({
+    engineReady: true,
+    backgroundConnected: true,
+    youtubeApiReady: Boolean(window.YT?.Player),
+    slotCount: slots.size,
+    lastAction: "Background engine initialized"
+  });
   const metadata = await lib_default.room.getMetadata();
   await applyRoomState(metadata[ROOM_STATE_KEY]);
   resetSyncLoop();
@@ -4057,6 +4134,11 @@ lib_default.onReady(async () => {
   lib_default.broadcast.onMessage(LOCAL_CONTROL_CHANNEL, (event) => {
     if (event.data?.type === "retry-local-audio") {
       retryLocalAudio().catch(() => {
+      });
+      return;
+    }
+    if (event.data?.type === "prime-local-audio") {
+      primeLocalAudio(event.data?.roomState).catch(() => {
       });
     }
   });

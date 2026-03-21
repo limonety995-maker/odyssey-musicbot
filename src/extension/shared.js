@@ -196,9 +196,14 @@ export function summarizeTransport(roomState) {
 export function createClientStatus(partial = {}) {
   return {
     updatedAt: safeNow(),
+    engineReady: Boolean(partial.engineReady),
+    backgroundConnected: Boolean(partial.backgroundConnected),
+    youtubeApiReady: Boolean(partial.youtubeApiReady),
     autoplayBlocked: Boolean(partial.autoplayBlocked),
     errors: Array.isArray(partial.errors) ? partial.errors.slice(0, 8) : [],
     transportStatus: partial.transportStatus || TRANSPORT_STOPPED,
+    slotCount: Math.max(0, toNumber(partial.slotCount, 0)),
+    lastAction: typeof partial.lastAction === "string" ? partial.lastAction : "",
     activeLayerTitles: Array.isArray(partial.activeLayerTitles)
       ? partial.activeLayerTitles.slice(0, 8)
       : [],

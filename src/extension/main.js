@@ -250,6 +250,7 @@ async function handleAddTrack() {
 }
 
 async function handlePlayMix() {
+  await unlockLocalAudio();
   await mutateRoomState((draft, current) => {
     if (!draft.layers.length) {
       return false;
@@ -392,6 +393,17 @@ async function retryLocalAudio() {
   );
 }
 
+async function unlockLocalAudio() {
+  await OBR.broadcast.sendMessage(
+    LOCAL_CONTROL_CHANNEL,
+    {
+      type: "prime-local-audio",
+      roomState: state.roomState,
+    },
+    { destination: "LOCAL" },
+  );
+}
+
 function renderHeader() {
   const helperClass = state.helperOnline ? "pill success" : "pill warning";
   const roleClass = isGm() ? "pill accent" : "pill";
@@ -438,16 +450,33 @@ function renderHelperPanel() {
 function renderStatusPanel() {
   const localStatus = state.localClientStatus;
   if (!localStatus) {
-    return "";
+    return `
+      <section class="panel">
+        <h2>Playback status on this browser</h2>
+        <div class="warning-box">
+          <p>Background audio engine has not reported in yet. Reload the room once and reopen the extension.</p>
+          <button class="action-button secondary-button" data-action="unlock-audio">Enable audio here</button>
+        </div>
+      </section>
+    `;
   }
   return `
     <section class="panel">
       <h2>Playback status on this browser</h2>
       <p class="muted">Transport: ${escapeHtml(localStatus.transportStatus || TRANSPORT_STOPPED)}</p>
+      <p class="muted">Engine: ${escapeHtml(localStatus.engineReady ? "ready" : "starting")} • YouTube API: ${escapeHtml(localStatus.youtubeApiReady ? "ready" : "not ready")} • Slots: ${escapeHtml(String(localStatus.slotCount || 0))}</p>
+      ${localStatus.lastAction
+        ? `<p class="muted">Last action: ${escapeHtml(localStatus.lastAction)}</p>`
+        : ""}
+      <div class="button-row">
+        <button class="action-button secondary-button" data-action="unlock-audio">Enable audio here</button>
+        ${localStatus.autoplayBlocked
+          ? `<button class="action-button secondary-button" data-action="retry-audio">Retry audio here</button>`
+          : ""}
+      </div>
       ${localStatus.autoplayBlocked
         ? `<div class="warning-box">
-            <p>Autoplay is blocked on this browser. Open this panel and press the button below once.</p>
-            <button class="action-button secondary-button" data-action="retry-audio">Retry audio here</button>
+            <p>Autoplay is blocked on this browser. Press the button above once, then try Play again.</p>
           </div>`
         : ""}
       ${Array.isArray(localStatus.errors) && localStatus.errors.length
@@ -727,6 +756,9 @@ root?.addEventListener("click", async (event) => {
         break;
       case "retry-audio":
         await retryLocalAudio();
+        break;
+      case "unlock-audio":
+        await unlockLocalAudio();
         break;
       default:
         break;
