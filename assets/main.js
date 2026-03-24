@@ -4198,7 +4198,6 @@ async function unlockLocalAudio() {
 }
 function syncLocalOutputVolume(volume) {
   state.localOutputVolume = normalizeVolumeValue(volume);
-  setLocalOutputVolume(state.localOutputVolume);
 }
 function beginLocalOutputVolumeInteraction() {
   localOutputVolumeInteractionActive = true;
@@ -4213,6 +4212,7 @@ function finishLocalOutputVolumeInteraction() {
 }
 async function handleLocalOutputVolume(volume) {
   syncLocalOutputVolume(volume);
+  setLocalOutputVolume(state.localOutputVolume);
   if (localOutputVolumeSyncHandle) {
     window.clearTimeout(localOutputVolumeSyncHandle);
     localOutputVolumeSyncHandle = 0;
@@ -4241,7 +4241,7 @@ function queueLocalOutputVolumeSync() {
     handleLocalOutputVolume(state.localOutputVolume).catch(() => {
       setError("Failed to update local player volume.");
     });
-  }, 16);
+  }, 40);
 }
 function getCurrentView() {
   return isGm() && state.view === "scenes" ? "scenes" : "mix";
@@ -4622,6 +4622,12 @@ root?.addEventListener("focusin", (event) => {
     beginLocalOutputVolumeInteraction();
   }
 });
+root?.addEventListener("pointerdown", (event) => {
+  const target = event.target;
+  if (target instanceof HTMLInputElement && target.name === "localOutputVolume") {
+    beginLocalOutputVolumeInteraction();
+  }
+});
 root?.addEventListener("focusout", (event) => {
   const target = event.target;
   if (target instanceof HTMLInputElement && target.name === "localOutputVolume") {
@@ -4631,6 +4637,18 @@ root?.addEventListener("focusout", (event) => {
       }
       finishLocalOutputVolumeInteraction();
     }, 0);
+  }
+});
+root?.addEventListener("pointerup", (event) => {
+  const target = event.target;
+  if (target instanceof HTMLInputElement && target.name === "localOutputVolume") {
+    finishLocalOutputVolumeInteraction();
+  }
+});
+root?.addEventListener("pointercancel", (event) => {
+  const target = event.target;
+  if (target instanceof HTMLInputElement && target.name === "localOutputVolume") {
+    finishLocalOutputVolumeInteraction();
   }
 });
 root?.addEventListener("change", async (event) => {
