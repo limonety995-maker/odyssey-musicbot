@@ -3768,7 +3768,17 @@ function buildHelperUrlCandidates(rawUrl) {
   }
   return [...new Set(candidates)];
 }
+function setPlayerHelperState() {
+  state.helperOnline = false;
+  state.helperWarnings = [];
+  state.helperMessage = "Players do not need a local helper on this device.";
+}
 async function refreshHelper() {
+  if (!isGm()) {
+    setPlayerHelperState();
+    render();
+    return;
+  }
   let lastError = null;
   for (const candidate of buildHelperUrlCandidates(state.helperUrl)) {
     try {
@@ -4105,6 +4115,7 @@ function renderCommandDeck() {
   const transportClass = state.roomState.transport.status === TRANSPORT_PLAYING ? "pill success" : state.roomState.transport.status === TRANSPORT_PAUSED ? "pill warning" : "pill";
   const disabled = !isGm() || !state.roomState.layers.length || state.busy;
   const currentView = getCurrentView();
+  const helperPill = isGm() ? `<span class="${helperClass}">${escapeHtml(state.helperOnline ? "Helper online" : "Helper offline")}</span>` : `<span class="pill">Local player</span>`;
   return `
     <section class="panel command-deck">
       <div class="command-copy">
@@ -4113,7 +4124,7 @@ function renderCommandDeck() {
         <p>${escapeHtml(summarizeTransport(state.roomState))}</p>
       </div>
       <div class="hero-pills">
-        <span class="${helperClass}">${escapeHtml(state.helperOnline ? "Helper online" : "Helper offline")}</span>
+        ${helperPill}
         <span class="${roleClass}">${escapeHtml(state.role)}</span>
         <span class="${transportClass}">${escapeHtml(state.roomState.transport.status)}</span>
       </div>
@@ -4558,6 +4569,9 @@ root?.addEventListener("click", async (event) => {
 });
 lib_default.onReady(async () => {
   state.role = await lib_default.player.getRole();
+  if (!isGm()) {
+    setPlayerHelperState();
+  }
   await Promise.all([
     refreshRoomState(),
     refreshLocalClientStatus()
@@ -4569,6 +4583,12 @@ lib_default.onReady(async () => {
   lib_default.player.onChange((player) => {
     state.role = player.role;
     syncLocalStatusFromPlayer(player);
+    if (state.role === "GM") {
+      refreshHelper().catch(() => {
+      });
+    } else {
+      setPlayerHelperState();
+    }
     render();
   });
   lib_default.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {
@@ -4579,5 +4599,7 @@ lib_default.onReady(async () => {
   });
   state.loading = false;
   render();
-  await refreshHelper();
+  if (isGm()) {
+    await refreshHelper();
+  }
 });
