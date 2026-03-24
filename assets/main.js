@@ -4328,10 +4328,29 @@ function renderBrowserStatusPanel() {
         </div>
       </div>
       ${localStatus.lastAction ? `<p class="muted status-trace">Last action: ${escapeHtml(localStatus.lastAction)}</p>` : ""}
-      <label class="field-label" for="local-output-volume">Volume on this browser</label>
+      ${localStatus.autoplayBlocked ? `<div class="warning-box">
+            <p>Autoplay is blocked on this browser. Press unlock once, then try Play again.</p>
+          </div>` : ""}
+      ${Array.isArray(localStatus.errors) && localStatus.errors.length ? `<div class="warning-box">${localStatus.errors.map((entry) => `<p>${escapeHtml(entry)}</p>`).join("")}</div>` : ""}
+    </section>
+  `;
+}
+function renderPlayerVolumePanel() {
+  if (isGm()) {
+    return "";
+  }
+  return `
+    <section class="panel player-volume-panel">
+      <div class="section-row">
+        <div>
+          <h2>Player volume</h2>
+          <p class="muted">Changes the broadcast volume only on this player's browser.</p>
+        </div>
+      </div>
+      <label class="field-label" for="player-local-output-volume">Broadcast volume</label>
       <div class="range-row">
         <input
-          id="local-output-volume"
+          id="player-local-output-volume"
           name="localOutputVolume"
           data-range="local-output-volume"
           type="range"
@@ -4341,10 +4360,6 @@ function renderBrowserStatusPanel() {
         />
         <span>${state.localOutputVolume}%</span>
       </div>
-      ${localStatus.autoplayBlocked ? `<div class="warning-box">
-            <p>Autoplay is blocked on this browser. Press unlock once, then try Play again.</p>
-          </div>` : ""}
-      ${Array.isArray(localStatus.errors) && localStatus.errors.length ? `<div class="warning-box">${localStatus.errors.map((entry) => `<p>${escapeHtml(entry)}</p>`).join("")}</div>` : ""}
     </section>
   `;
 }
@@ -4484,6 +4499,7 @@ function renderMixView() {
   return `
     ${renderMixOverview()}
     ${renderNoticePanel()}
+    ${renderPlayerVolumePanel()}
     ${renderBrowserStatusPanel()}
     ${renderAddTrackPanel()}
     ${renderActiveLayers()}

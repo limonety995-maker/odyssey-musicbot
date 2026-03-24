@@ -106,7 +106,8 @@ code {
 
 .browser-console,
 .composer-panel,
-.helper-panel {
+.helper-panel,
+.player-volume-panel {
   display: grid;
   gap: 12px;
 }
