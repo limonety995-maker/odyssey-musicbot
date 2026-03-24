@@ -48,6 +48,16 @@ code {
   padding: 14px;
 }
 
+.workspace-stack,
+.mix-overview {
+  display: grid;
+  gap: 12px;
+}
+
+.mix-overview {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .panel {
   background: linear-gradient(180deg, rgba(23, 35, 50, 0.94), rgba(17, 26, 37, 0.94));
   border: 1px solid var(--border);
@@ -61,6 +71,85 @@ code {
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
+}
+
+.command-deck {
+  display: grid;
+  gap: 12px;
+  background:
+    radial-gradient(circle at top right, rgba(240, 179, 91, 0.16), transparent 28%),
+    linear-gradient(180deg, rgba(23, 35, 50, 0.98), rgba(17, 26, 37, 0.96));
+}
+
+.command-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.command-copy h1 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.eyebrow {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.command-actions {
+  display: grid;
+  gap: 12px;
+}
+
+.browser-console,
+.composer-panel,
+.helper-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.transport-cluster,
+.deck-summary,
+.view-tabs,
+.status-grid,
+.layer-meta,
+.layer-title-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.deck-slider {
+  display: grid;
+  gap: 6px;
+}
+
+.deck-summary {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.view-tabs {
+  gap: 6px;
+}
+
+.tab-button {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.tab-button.is-active {
+  background: rgba(240, 179, 91, 0.18);
+  border-color: rgba(240, 179, 91, 0.4);
+  color: var(--text);
 }
 
 .hero-copy h1,
@@ -205,6 +294,26 @@ input[type="range"] {
   margin-top: 8px;
 }
 
+.stat-card {
+  display: grid;
+  gap: 6px;
+  min-height: 112px;
+  align-content: start;
+}
+
+.stat-card strong {
+  font-size: 32px;
+  line-height: 1;
+}
+
+.stat-label,
+.status-label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .layer-stack,
 .scene-stack {
   display: grid;
@@ -218,6 +327,38 @@ input[type="range"] {
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.scene-copy {
+  min-width: 0;
+}
+
+.status-chip {
+  min-width: 0;
+  flex: 1 1 110px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.status-chip strong {
+  display: block;
+  margin-top: 4px;
+}
+
+.status-trace {
+  margin-top: 8px;
+}
+
+.layer-title-row {
+  align-items: center;
+}
+
+.layer-meta {
+  margin: 6px 0 8px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .warning-box,
@@ -294,11 +435,17 @@ input[type="range"] {
     padding: 10px;
   }
 
+  .mix-overview {
+    grid-template-columns: 1fr;
+  }
+
   .hero-panel,
+  .command-actions,
   .section-row,
   .scene-card,
   .layer-head,
-  .inline-form {
+  .inline-form,
+  .transport-cluster {
     flex-direction: column;
     align-items: stretch;
   }

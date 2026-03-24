@@ -45,6 +45,7 @@ const state = {
   localClientStatus: null,
   localOutputVolume: getLocalOutputVolume(),
   lastError: "",
+  view: "mix",
 };
 
 function escapeHtml(value) {
@@ -484,6 +485,121 @@ async function handleLocalOutputVolume(volume) {
   );
 }
 
+function getCurrentView() {
+  return isGm() && state.view === "scenes" ? "scenes" : "mix";
+}
+
+function countPlayingLayers() {
+  return state.roomState.layers.filter((layer) => layer.runtime.status === TRANSPORT_PLAYING).length;
+}
+
+function renderCommandDeck() {
+  const helperClass = state.helperOnline ? "pill success" : "pill warning";
+  const roleClass = isGm() ? "pill accent" : "pill";
+  const transportClass = state.roomState.transport.status === TRANSPORT_PLAYING
+    ? "pill success"
+    : state.roomState.transport.status === TRANSPORT_PAUSED
+      ? "pill warning"
+      : "pill";
+  const disabled = !isGm() || !state.roomState.layers.length || state.busy;
+  const currentView = getCurrentView();
+
+  return `
+    <section class="panel command-deck">
+      <div class="command-copy">
+        <p class="eyebrow">Sync Music MVP</p>
+        <h1>${escapeHtml(state.roomState.activeScene?.name || "Live mix")}</h1>
+        <p>${escapeHtml(summarizeTransport(state.roomState))}</p>
+      </div>
+      <div class="hero-pills">
+        <span class="${helperClass}">${escapeHtml(state.helperOnline ? "Helper online" : "Helper offline")}</span>
+        <span class="${roleClass}">${escapeHtml(state.role)}</span>
+        <span class="${transportClass}">${escapeHtml(state.roomState.transport.status)}</span>
+      </div>
+      <div class="command-actions">
+        ${isGm()
+          ? `
+            <div class="transport-cluster">
+              <button class="action-button" data-action="play-mix" ${disabled ? "disabled" : ""}>Play</button>
+              <button class="action-button secondary-button" data-action="pause-mix" ${disabled ? "disabled" : ""}>Pause</button>
+              <button class="action-button danger-button" data-action="stop-mix" ${disabled ? "disabled" : ""}>Stop</button>
+            </div>
+            <div class="deck-slider">
+              <label class="field-label" for="master-volume">Master volume</label>
+              <div class="range-row">
+                <input id="master-volume" data-range="master-volume" type="range" min="0" max="100" value="${state.roomState.transport.masterVolume}" ${disabled ? "disabled" : ""} />
+                <span>${state.roomState.transport.masterVolume}%</span>
+              </div>
+            </div>
+          `
+          : `
+            <div class="deck-summary">
+              <span>${escapeHtml(`GM transport: ${state.roomState.transport.status}`)}</span>
+              <span>${escapeHtml(`${countPlayingLayers()} live layer${countPlayingLayers() === 1 ? "" : "s"}`)}</span>
+            </div>
+          `}
+      </div>
+      <div class="view-tabs" role="tablist" aria-label="Workspace view">
+        <button class="tab-button ${currentView === "mix" ? "is-active" : ""}" data-action="set-view" data-view="mix">Mix</button>
+        ${isGm()
+          ? `<button class="tab-button ${currentView === "scenes" ? "is-active" : ""}" data-action="set-view" data-view="scenes">Scenes</button>`
+          : ""}
+      </div>
+    </section>
+  `;
+}
+
+function renderMixOverview() {
+  const totalLayers = state.roomState.layers.length;
+  const playingLayers = countPlayingLayers();
+  const pausedLayers = state.roomState.layers.filter((layer) => layer.runtime.status === TRANSPORT_PAUSED).length;
+  const sceneCount = Array.isArray(state.library.scenes) ? state.library.scenes.length : 0;
+
+  return `
+    <section class="mix-overview">
+      <article class="panel stat-card">
+        <span class="stat-label">Live layers</span>
+        <strong>${totalLayers}</strong>
+        <span class="muted">${playingLayers} playing now</span>
+      </article>
+      <article class="panel stat-card">
+        <span class="stat-label">Paused layers</span>
+        <strong>${pausedLayers}</strong>
+        <span class="muted">${escapeHtml(state.roomState.transport.status)}</span>
+      </article>
+      <article class="panel stat-card">
+        <span class="stat-label">Saved scenes</span>
+        <strong>${sceneCount}</strong>
+        <span class="muted">${escapeHtml(state.roomState.activeScene?.name || "Live mix")}</span>
+      </article>
+    </section>
+  `;
+}
+
+function renderMixView() {
+  return `
+    ${renderMixOverview()}
+    ${renderBrowserStatusPanel()}
+    ${renderHelperPanel()}
+    ${renderAddTrackPanel()}
+    ${renderActiveLayers()}
+    ${renderLimitationsPanel()}
+  `;
+}
+
+function renderScenesView() {
+  if (!isGm()) {
+    return renderMixView();
+  }
+
+  return `
+    ${renderBrowserStatusPanel()}
+    ${renderHelperPanel()}
+    ${renderScenesPanel()}
+    ${renderLimitationsPanel()}
+  `;
+}
+
 function renderHeader() {
   const helperClass = state.helperOnline ? "pill success" : "pill warning";
   const roleClass = isGm() ? "pill accent" : "pill";
@@ -503,23 +619,20 @@ function renderHeader() {
 
 function renderHelperPanel() {
   if (!isGm()) {
-    return `
-      <section class="panel">
-        <h2>Local status</h2>
-        <p class="muted">${escapeHtml(state.helperMessage)}</p>
-      </section>
-    `;
+    return "";
   }
 
   return `
-    <section class="panel">
+    <section class="panel helper-panel">
       <div class="section-row">
-        <h2>GM helper</h2>
+        <div>
+          <h2>GM helper</h2>
+          <p class="muted">${escapeHtml(state.helperMessage)}</p>
+        </div>
         <button class="ghost-button" data-action="refresh-helper">Reconnect</button>
       </div>
       <label class="field-label" for="helper-url">Helper URL</label>
       <input id="helper-url" name="helperUrl" type="url" value="${escapeHtml(state.helperUrl)}" placeholder="${escapeHtml(DEFAULT_HELPER_URL)}" />
-      <p class="muted">${escapeHtml(state.helperMessage)}</p>
       ${state.helperWarnings.length
         ? `<div class="warning-box">${state.helperWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>`
         : ""}
@@ -574,10 +687,12 @@ function renderBrowserStatusPanel() {
   const localStatus = state.localClientStatus;
   if (!localStatus) {
     return `
-      <section class="panel">
-        <h2>Playback status on this browser</h2>
-        <div class="warning-box">
-          <p>Background audio engine has not reported in yet. Reload the room once and reopen the extension.</p>
+      <section class="panel browser-console">
+        <div class="section-row">
+          <div>
+            <h2>This browser</h2>
+            <p class="muted">Background audio engine has not reported in yet.</p>
+          </div>
           <button class="action-button secondary-button" data-action="unlock-audio">Enable audio here</button>
         </div>
       </section>
@@ -585,13 +700,35 @@ function renderBrowserStatusPanel() {
   }
 
   return `
-    <section class="panel">
-      <h2>Playback status on this browser</h2>
-      <p class="muted">Transport: ${escapeHtml(localStatus.transportStatus || TRANSPORT_STOPPED)}</p>
-      <p class="muted">Audio unlock: ${escapeHtml(localStatus.audioPrimed ? "done" : "needed")}</p>
-      <p class="muted">Engine: ${escapeHtml(localStatus.engineReady ? "ready" : "starting")} | YouTube API: ${escapeHtml(localStatus.youtubeApiReady ? "ready" : "not ready")} | Slots: ${escapeHtml(String(localStatus.slotCount || 0))}</p>
+    <section class="panel browser-console">
+      <div class="section-row">
+        <div>
+          <h2>This browser</h2>
+          <p class="muted">Transport: ${escapeHtml(localStatus.transportStatus || TRANSPORT_STOPPED)} | Audio unlock: ${escapeHtml(localStatus.audioPrimed ? "done" : "needed")}</p>
+        </div>
+        <div class="button-row compact-row">
+          <button class="action-button secondary-button" data-action="unlock-audio">${escapeHtml(localStatus.audioPrimed ? "Audio unlocked" : "Enable audio here")}</button>
+          ${localStatus.autoplayBlocked
+            ? `<button class="action-button secondary-button" data-action="retry-audio">Retry audio here</button>`
+            : ""}
+        </div>
+      </div>
+      <div class="status-grid">
+        <div class="status-chip">
+          <span class="status-label">Engine</span>
+          <strong>${escapeHtml(localStatus.engineReady ? "ready" : "starting")}</strong>
+        </div>
+        <div class="status-chip">
+          <span class="status-label">YouTube API</span>
+          <strong>${escapeHtml(localStatus.youtubeApiReady ? "ready" : "not ready")}</strong>
+        </div>
+        <div class="status-chip">
+          <span class="status-label">Slots</span>
+          <strong>${escapeHtml(String(localStatus.slotCount || 0))}</strong>
+        </div>
+      </div>
       ${localStatus.lastAction
-        ? `<p class="muted">Last action: ${escapeHtml(localStatus.lastAction)}</p>`
+        ? `<p class="muted status-trace">Last action: ${escapeHtml(localStatus.lastAction)}</p>`
         : ""}
       <label class="field-label" for="local-output-volume">Volume on this browser</label>
       <div class="range-row">
@@ -606,18 +743,9 @@ function renderBrowserStatusPanel() {
         />
         <span>${state.localOutputVolume}%</span>
       </div>
-      <div class="button-row">
-        <button class="action-button secondary-button" data-action="unlock-audio">${escapeHtml(localStatus.audioPrimed ? "Audio unlocked" : "Enable audio here")}</button>
-        ${localStatus.autoplayBlocked
-          ? `<button class="action-button secondary-button" data-action="retry-audio">Retry audio here</button>`
-          : ""}
-      </div>
-      <div class="warning-box">
-        <p>This button only unlocks audio in this browser. It does not start a stopped mix by itself. After that, the GM still needs to press Play in Transport.</p>
-      </div>
       ${localStatus.autoplayBlocked
         ? `<div class="warning-box">
-            <p>Autoplay is blocked on this browser. Press the button above once, then try Play again.</p>
+            <p>Autoplay is blocked on this browser. Press unlock once, then try Play again.</p>
           </div>`
         : ""}
       ${Array.isArray(localStatus.errors) && localStatus.errors.length
@@ -663,15 +791,18 @@ function renderAddTrackPanel() {
     return "";
   }
   return `
-    <section class="panel">
-      <h2>Add track</h2>
-      <label class="field-label" for="track-url">YouTube or YouTube Music URL</label>
-      <input id="track-url" name="draftUrl" type="url" value="${escapeHtml(state.draft.url)}" placeholder="https://www.youtube.com/watch?v=..." />
-      <label class="field-label" for="track-title">Custom title (optional)</label>
-      <input id="track-title" name="draftTitle" type="text" value="${escapeHtml(state.draft.title)}" placeholder="Leave blank to auto-fill" />
-      <div class="button-row">
-        <button class="action-button" data-action="add-track" ${state.busy ? "disabled" : ""}>Add to active mix</button>
+    <section class="panel composer-panel">
+      <div class="section-row">
+        <div>
+          <h2>Queue a new layer</h2>
+          <p class="muted">Drop in a YouTube or YouTube Music link and add it straight to the live mix.</p>
+        </div>
+        <button class="action-button" data-action="add-track" ${state.busy ? "disabled" : ""}>Add to mix</button>
       </div>
+      <label class="field-label" for="track-url">Track URL</label>
+      <input id="track-url" name="draftUrl" type="url" value="${escapeHtml(state.draft.url)}" placeholder="https://www.youtube.com/watch?v=..." />
+      <label class="field-label" for="track-title">Custom title</label>
+      <input id="track-title" name="draftTitle" type="text" value="${escapeHtml(state.draft.title)}" placeholder="Optional scene-friendly title" />
       <p class="muted">Best support is for direct watch links and playlist links that expose a <code>v=</code> or <code>list=</code> ID.</p>
     </section>
   `;
@@ -681,51 +812,73 @@ function renderActiveLayers() {
   if (!state.roomState.layers.length) {
     return `
       <section class="panel">
-        <h2>Active layers</h2>
-        <p class="muted">No tracks are active right now.</p>
+        <h2>Live mix</h2>
+        <p class="muted">No layers are loaded yet. Add a track or launch a saved scene.</p>
       </section>
     `;
   }
 
-  const cards = state.roomState.layers.map((layer) => `
-    <article class="layer-card">
-      <div class="layer-head">
-        <div>
-          <h3>${escapeHtml(layer.title)}</h3>
-          <p class="muted">${escapeHtml(formatSourceType(layer))}</p>
+  const cards = state.roomState.layers.map((layer) => {
+    const layerState = layer.runtime.status || TRANSPORT_STOPPED;
+    const badgeClass = layerState === TRANSPORT_PLAYING
+      ? "pill success"
+      : layerState === TRANSPORT_PAUSED
+        ? "pill warning"
+        : "pill";
+
+    return `
+      <article class="layer-card">
+        <div class="layer-head">
+          <div>
+            <div class="layer-title-row">
+              <h3>${escapeHtml(layer.title)}</h3>
+              <span class="${badgeClass}">${escapeHtml(layerState)}</span>
+            </div>
+            <p class="muted">${escapeHtml(formatSourceType(layer))}</p>
+          </div>
+          ${isGm()
+            ? `<button class="ghost-button danger-text" data-action="remove-layer" data-layer-id="${escapeHtml(layer.id)}">Remove</button>`
+            : ""}
         </div>
-        ${isGm()
-          ? `<button class="ghost-button danger-text" data-action="remove-layer" data-layer-id="${escapeHtml(layer.id)}">Remove</button>`
-          : ""}
-      </div>
-      <div class="range-row">
-        <input
-          data-range="layer-volume"
-          data-layer-id="${escapeHtml(layer.id)}"
-          type="range"
-          min="0"
-          max="100"
-          value="${layer.volume}"
-          ${!isGm() ? "disabled" : ""}
-        />
-        <span>${layer.volume}%</span>
-      </div>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          data-toggle="layer-loop"
-          data-layer-id="${escapeHtml(layer.id)}"
-          ${layer.loop ? "checked" : ""}
-          ${!isGm() ? "disabled" : ""}
-        />
-        <span>Loop this layer</span>
-      </label>
-    </article>
-  `).join("");
+        <div class="layer-meta">
+          <span>${escapeHtml(layer.loop ? "Loop enabled" : "Loop off")}</span>
+          <span>${escapeHtml(`Start ${Math.round(layer.startSeconds)}s`)}</span>
+        </div>
+        <label class="field-label">Layer volume</label>
+        <div class="range-row">
+          <input
+            data-range="layer-volume"
+            data-layer-id="${escapeHtml(layer.id)}"
+            type="range"
+            min="0"
+            max="100"
+            value="${layer.volume}"
+            ${!isGm() ? "disabled" : ""}
+          />
+          <span>${layer.volume}%</span>
+        </div>
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            data-toggle="layer-loop"
+            data-layer-id="${escapeHtml(layer.id)}"
+            ${layer.loop ? "checked" : ""}
+            ${!isGm() ? "disabled" : ""}
+          />
+          <span>Keep this layer looping</span>
+        </label>
+      </article>
+    `;
+  }).join("");
 
   return `
     <section class="panel">
-      <h2>Active layers</h2>
+      <div class="section-row">
+        <div>
+          <h2>Live mix</h2>
+          <p class="muted">${state.roomState.layers.length} layer${state.roomState.layers.length === 1 ? "" : "s"} loaded</p>
+        </div>
+      </div>
       <div class="layer-stack">${cards}</div>
     </section>
   `;
@@ -736,33 +889,32 @@ function renderScenesPanel() {
   const sceneCards = scenes.length
     ? scenes.map((scene) => `
         <article class="scene-card">
-          <div>
+          <div class="scene-copy">
             <h3>${escapeHtml(scene.name)}</h3>
             <p class="muted">${scene.layers.length} layer${scene.layers.length === 1 ? "" : "s"}</p>
           </div>
-          ${isGm()
-            ? `<div class="button-row compact-row">
-                <button class="ghost-button" data-action="play-scene" data-scene-id="${escapeHtml(scene.id)}">Play scene</button>
-                <button class="ghost-button danger-text" data-action="delete-scene" data-scene-id="${escapeHtml(scene.id)}">Delete</button>
-              </div>`
-            : ""}
+          <div class="button-row compact-row">
+            <button class="ghost-button" data-action="play-scene" data-scene-id="${escapeHtml(scene.id)}" ${state.busy ? "disabled" : ""}>Load</button>
+            <button class="ghost-button danger-text" data-action="delete-scene" data-scene-id="${escapeHtml(scene.id)}" ${state.busy ? "disabled" : ""}>Delete</button>
+          </div>
         </article>
       `).join("")
-    : `<p class="muted">No saved scenes yet.</p>`;
+    : `<p class="muted">No saved scenes yet. Build a live mix and save it here.</p>`;
 
   return `
     <section class="panel">
       <div class="section-row">
-        <h2>Saved scenes</h2>
+        <div>
+          <h2>Scene library</h2>
+          <p class="muted">Reusable presets for ambience stacks, music combos, and encounter setups.</p>
+        </div>
         <button class="ghost-button" data-action="refresh-helper">Refresh</button>
       </div>
-      ${isGm()
-        ? `<label class="field-label" for="scene-name">Save current mix as scene</label>
-           <div class="inline-form">
-             <input id="scene-name" name="draftSceneName" type="text" value="${escapeHtml(state.draft.sceneName)}" placeholder="Rainy forest, Tavern, Boss fight..." />
-             <button class="action-button" data-action="save-scene" ${state.busy ? "disabled" : ""}>Save</button>
-           </div>`
-        : ""}
+      <label class="field-label" for="scene-name">Save current mix as a scene</label>
+      <div class="inline-form">
+        <input id="scene-name" name="draftSceneName" type="text" value="${escapeHtml(state.draft.sceneName)}" placeholder="Rainy forest, Tavern, Boss fight..." />
+        <button class="action-button" data-action="save-scene" ${state.busy || !state.roomState.layers.length ? "disabled" : ""}>Save</button>
+      </div>
       <div class="scene-stack">${sceneCards}</div>
     </section>
   `;
@@ -775,9 +927,9 @@ function renderLimitationsPanel() {
       <ul class="plain-list">
         <li>YouTube playback works through the official IFrame API.</li>
         <li>YouTube Music works when the helper can resolve the link to a normal YouTube video or playlist ID.</li>
-        <li>YouTube ads on embedded videos are controlled by YouTube. This extension reduces unnecessary reloads, but it cannot force ad-free playback.</li>
+        <li>YouTube ads on embedded videos are controlled by YouTube. This extension can reduce reload churn, but it cannot force ad-free playback.</li>
         <li>If a video forbids embeds, YouTube will return error 101 or 150 and this browser will show a warning.</li>
-        <li>If autoplay is blocked, each affected browser needs one click in this panel to retry audio locally.</li>
+        <li>If autoplay is blocked, each affected browser needs one click in this panel to unlock audio locally.</li>
       </ul>
     </section>
   `;
@@ -805,15 +957,11 @@ function render() {
 
   root.innerHTML = `
     <main class="layout">
-      ${renderHeader()}
+      ${renderCommandDeck()}
       ${state.lastError ? `<section class="panel error-box"><p>${escapeHtml(state.lastError)}</p></section>` : ""}
-      ${renderHelperPanel()}
-      ${renderBrowserStatusPanel()}
-      ${renderTransportPanel()}
-      ${renderAddTrackPanel()}
-      ${renderActiveLayers()}
-      ${renderScenesPanel()}
-      ${renderLimitationsPanel()}
+      <section class="workspace-stack">
+        ${getCurrentView() === "scenes" ? renderScenesView() : renderMixView()}
+      </section>
     </main>
   `;
 }
@@ -886,6 +1034,12 @@ root?.addEventListener("click", async (event) => {
 
   try {
     switch (action) {
+      case "set-view":
+        if (target.dataset.view) {
+          state.view = target.dataset.view === "scenes" ? "scenes" : "mix";
+          render();
+        }
+        break;
       case "refresh-helper":
         await refreshHelper();
         break;
