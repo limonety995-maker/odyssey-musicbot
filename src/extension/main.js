@@ -46,6 +46,9 @@ const state = {
   notices: [],
   view: "mix",
 };
+let localOutputVolumeSyncHandle = 0;
+let localOutputVolumeInteractionActive = false;
+let localOutputVolumeRenderPending = false;
 
 function escapeHtml(value) {
   return String(value || "")
@@ -62,6 +65,13 @@ function isGm() {
 function normalizeVolumeValue(value, fallback = 100) {
   const numeric = Number(value);
   return clamp(Number.isFinite(numeric) ? numeric : fallback, 0, 100);
+}
+
+function formatVolumeLabel(value) {
+  const normalized = normalizeVolumeValue(value);
+  return Number.isInteger(normalized)
+    ? `${normalized}%`
+    : `${normalized.toFixed(1)}%`;
 }
 
 function setBusy(value) {
@@ -96,11 +106,13 @@ async function refreshLocalClientStatus() {
   if (metadata[CLIENT_STATUS_KEY]) {
     state.localClientStatus = metadata[CLIENT_STATUS_KEY];
   }
-  state.localOutputVolume = clamp(
-    Number(state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume()),
-    0,
-    100,
-  );
+  if (!localOutputVolumeInteractionActive) {
+    state.localOutputVolume = clamp(
+      Number(state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume()),
+      0,
+      100,
+    );
+  }
 }
 
 function syncLocalStatusFromPlayer(player) {
@@ -108,9 +120,11 @@ function syncLocalStatusFromPlayer(player) {
   if (nextStatus) {
     state.localClientStatus = nextStatus;
   }
-  state.localOutputVolume = normalizeVolumeValue(
-    state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume(),
-  );
+  if (!localOutputVolumeInteractionActive) {
+    state.localOutputVolume = normalizeVolumeValue(
+      state.localClientStatus?.localOutputVolume ?? getLocalOutputVolume(),
+    );
+  }
 }
 
 async function pushRoomState(nextState) {
@@ -439,8 +453,25 @@ function syncLocalOutputVolume(volume) {
   setLocalOutputVolume(state.localOutputVolume);
 }
 
+function beginLocalOutputVolumeInteraction() {
+  localOutputVolumeInteractionActive = true;
+}
+
+function finishLocalOutputVolumeInteraction() {
+  const shouldRender = localOutputVolumeRenderPending;
+  localOutputVolumeInteractionActive = false;
+  localOutputVolumeRenderPending = false;
+  if (shouldRender) {
+    render();
+  }
+}
+
 async function handleLocalOutputVolume(volume) {
   syncLocalOutputVolume(volume);
+  if (localOutputVolumeSyncHandle) {
+    window.clearTimeout(localOutputVolumeSyncHandle);
+    localOutputVolumeSyncHandle = 0;
+  }
   await OBR.broadcast.sendMessage(
     LOCAL_CONTROL_CHANNEL,
     {
@@ -449,6 +480,25 @@ async function handleLocalOutputVolume(volume) {
     },
     { destination: "LOCAL" },
   );
+}
+
+function updateLocalVolumePreview(target) {
+  const valueElement = target.parentElement?.querySelector("[data-local-volume-value]");
+  if (valueElement) {
+    valueElement.textContent = formatVolumeLabel(state.localOutputVolume);
+  }
+}
+
+function queueLocalOutputVolumeSync() {
+  if (localOutputVolumeSyncHandle) {
+    window.clearTimeout(localOutputVolumeSyncHandle);
+  }
+  localOutputVolumeSyncHandle = window.setTimeout(() => {
+    localOutputVolumeSyncHandle = 0;
+    handleLocalOutputVolume(state.localOutputVolume).catch(() => {
+      setError("Failed to update local player volume.");
+    });
+  }, 16);
 }
 
 function getCurrentView() {
@@ -504,7 +554,7 @@ function renderCommandDeck() {
               <label class="field-label" for="master-volume">Master volume</label>
               <div class="range-row">
                 <input id="master-volume" data-range="master-volume" type="range" min="0" max="100" value="${state.roomState.transport.masterVolume}" ${disabled ? "disabled" : ""} />
-                <span>${state.roomState.transport.masterVolume}%</span>
+                <span class="range-value">${state.roomState.transport.masterVolume}%</span>
               </div>
             </div>
           `
@@ -633,9 +683,10 @@ function renderPlayerVolumePanel() {
           type="range"
           min="0"
           max="100"
+          step="0.1"
           value="${state.localOutputVolume}"
         />
-        <span>${state.localOutputVolume}%</span>
+        <span class="range-value" data-local-volume-value>${formatVolumeLabel(state.localOutputVolume)}</span>
       </div>
     </section>
   `;
@@ -710,7 +761,7 @@ function renderActiveLayers() {
             value="${layer.volume}"
             ${!isGm() ? "disabled" : ""}
           />
-          <span>${layer.volume}%</span>
+          <span class="range-value">${layer.volume}%</span>
         </div>
         <label class="toggle-row">
           <input
@@ -828,6 +879,13 @@ function render() {
     return;
   }
 
+  if (localOutputVolumeInteractionActive) {
+    localOutputVolumeRenderPending = true;
+    return;
+  }
+
+  localOutputVolumeRenderPending = false;
+
   if (state.loading) {
     root.innerHTML = renderLoadingState();
     return;
@@ -862,8 +920,29 @@ root?.addEventListener("input", (event) => {
     return;
   }
   if (target.name === "localOutputVolume") {
+    beginLocalOutputVolumeInteraction();
     syncLocalOutputVolume(target.value);
-    render();
+    updateLocalVolumePreview(target);
+    queueLocalOutputVolumeSync();
+  }
+});
+
+root?.addEventListener("focusin", (event) => {
+  const target = event.target;
+  if (target instanceof HTMLInputElement && target.name === "localOutputVolume") {
+    beginLocalOutputVolumeInteraction();
+  }
+});
+
+root?.addEventListener("focusout", (event) => {
+  const target = event.target;
+  if (target instanceof HTMLInputElement && target.name === "localOutputVolume") {
+    window.setTimeout(() => {
+      if (document.activeElement instanceof HTMLInputElement && document.activeElement.name === "localOutputVolume") {
+        return;
+      }
+      finishLocalOutputVolumeInteraction();
+    }, 0);
   }
 });
 
@@ -883,6 +962,8 @@ root?.addEventListener("change", async (event) => {
     }
     if (target.dataset.range === "local-output-volume") {
       await handleLocalOutputVolume(target.value);
+      updateLocalVolumePreview(target);
+      finishLocalOutputVolumeInteraction();
       return;
     }
     if (target.dataset.toggle === "layer-loop" && target.dataset.layerId) {

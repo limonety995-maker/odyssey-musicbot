@@ -821,9 +821,6 @@ OBR.onReady(async () => {
       localOutputVolume = normalizeVolumeValue(event.data?.volume);
       setLocalOutputVolume(localOutputVolume);
       applyLocalVolumeToActiveSlots()
-        .then(() => publishClientStatus({
-          lastAction: `Local output volume set to ${localOutputVolume}%`,
-        }))
         .catch(() => {
           // Ignore local volume update failures.
         });
