@@ -3678,6 +3678,7 @@ function createClientStatus(partial = {}) {
 }
 
 // src/extension/sync-logic.js
+var END_CONFIRM_TOLERANCE_SEC = 1.5;
 function buildRoomStateApplyKey2(roomState) {
   return buildRoomStateApplyKey(roomState);
 }
@@ -3702,6 +3703,14 @@ function shouldResetSyncLoopForRoleChange(currentIsGm, nextRole) {
 }
 function shouldWritePeriodicSyncUpdate(layer, snapshot) {
   return layer?.sourceType === "playlist" && (snapshot?.playlistIndex !== layer.runtime?.playlistIndex || snapshot?.videoId !== layer.runtime?.playlistVideoId);
+}
+function isConfirmedTrackEnd(snapshot, toleranceSec = END_CONFIRM_TOLERANCE_SEC) {
+  const duration = Number(snapshot?.duration) || 0;
+  const currentTime = Math.max(0, Number(snapshot?.currentTime) || 0);
+  if (duration <= 0) {
+    return false;
+  }
+  return currentTime >= Math.max(0, duration - toleranceSec);
 }
 
 // src/extension/background.js
@@ -3787,7 +3796,8 @@ async function getPlayerSnapshot(slot) {
     currentTime: typeof player.getCurrentTime === "function" ? Number(player.getCurrentTime()) || 0 : 0,
     playlistIndex: typeof player.getPlaylistIndex === "function" ? Math.max(0, Number(player.getPlaylistIndex()) || 0) : 0,
     playerState: typeof player.getPlayerState === "function" ? player.getPlayerState() : -1,
-    videoId: typeof videoData?.video_id === "string" ? videoData.video_id : null
+    videoId: typeof videoData?.video_id === "string" ? videoData.video_id : null,
+    duration: typeof player.getDuration === "function" ? Math.max(0, Number(player.getDuration()) || 0) : 0
   };
 }
 function desiredSourceKey(layer) {
@@ -4184,6 +4194,14 @@ async function handlePlayerStateChange(layerId, playerState) {
   if (window.YT?.PlayerState?.ENDED !== playerState) {
     return;
   }
+  const slot = slots.get(layerId);
+  if (slot) {
+    const snapshot = await getPlayerSnapshot(slot);
+    if (!isConfirmedTrackEnd(snapshot)) {
+      await startLayerPlayback(slot, layer, "Recovered from false ENDED");
+      return;
+    }
+  }
   if (writeInFlight) {
     return;
   }
@@ -4286,6 +4304,10 @@ async function gmPeriodicSync() {
       }
       const snapshot = await getPlayerSnapshot(slot);
       if (window.YT?.PlayerState?.ENDED === snapshot.playerState) {
+        if (!isConfirmedTrackEnd(snapshot)) {
+          await startLayerPlayback(slot, layer, "Recovered from false ENDED");
+          continue;
+        }
         if (layer.loop) {
           layer.runtime.pauseOffsetSec = layer.startSeconds;
           layer.runtime.playingSince = now + 1500;

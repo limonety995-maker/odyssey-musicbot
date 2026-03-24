@@ -21,6 +21,7 @@ import {
 } from "./shared.js";
 import {
   buildRoomStateApplyKey,
+  isConfirmedTrackEnd,
   shouldRecoverPlayback,
   shouldResetSyncLoopForRoleChange,
   shouldSkipRedundantPlaybackApply,
@@ -128,6 +129,9 @@ async function getPlayerSnapshot(slot) {
       ? player.getPlayerState()
       : -1,
     videoId: typeof videoData?.video_id === "string" ? videoData.video_id : null,
+    duration: typeof player.getDuration === "function"
+      ? Math.max(0, Number(player.getDuration()) || 0)
+      : 0,
   };
 }
 
@@ -587,6 +591,15 @@ async function handlePlayerStateChange(layerId, playerState) {
     return;
   }
 
+  const slot = slots.get(layerId);
+  if (slot) {
+    const snapshot = await getPlayerSnapshot(slot);
+    if (!isConfirmedTrackEnd(snapshot)) {
+      await startLayerPlayback(slot, layer, "Recovered from false ENDED");
+      return;
+    }
+  }
+
   if (writeInFlight) {
     return;
   }
@@ -701,6 +714,10 @@ async function gmPeriodicSync() {
       }
       const snapshot = await getPlayerSnapshot(slot);
       if (window.YT?.PlayerState?.ENDED === snapshot.playerState) {
+        if (!isConfirmedTrackEnd(snapshot)) {
+          await startLayerPlayback(slot, layer, "Recovered from false ENDED");
+          continue;
+        }
         if (layer.loop) {
           layer.runtime.pauseOffsetSec = layer.startSeconds;
           layer.runtime.playingSince = now + 1500;

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  isConfirmedTrackEnd,
   shouldRecoverPlayback,
   shouldResetSyncLoopForRoleChange,
   shouldSkipRedundantPlaybackApply,
@@ -115,5 +116,29 @@ test("periodic sync only writes for playlist progression", () => {
       videoId: "track-b",
     }),
     true,
+  );
+});
+
+test("ENDED is only trusted near the real track duration", () => {
+  assert.equal(
+    isConfirmedTrackEnd({
+      currentTime: 7,
+      duration: 180,
+    }),
+    false,
+  );
+  assert.equal(
+    isConfirmedTrackEnd({
+      currentTime: 179.2,
+      duration: 180,
+    }),
+    true,
+  );
+  assert.equal(
+    isConfirmedTrackEnd({
+      currentTime: 0,
+      duration: 0,
+    }),
+    false,
   );
 });

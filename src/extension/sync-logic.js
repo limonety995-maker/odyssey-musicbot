@@ -1,5 +1,7 @@
 import { buildRoomStateApplyKey as buildRoomStateKeyFromShared } from "./shared.js";
 
+const END_CONFIRM_TOLERANCE_SEC = 1.5;
+
 export function buildRoomStateApplyKey(roomState) {
   return buildRoomStateKeyFromShared(roomState);
 }
@@ -36,4 +38,13 @@ export function shouldWritePeriodicSyncUpdate(layer, snapshot) {
       snapshot?.playlistIndex !== layer.runtime?.playlistIndex
       || snapshot?.videoId !== layer.runtime?.playlistVideoId
     );
+}
+
+export function isConfirmedTrackEnd(snapshot, toleranceSec = END_CONFIRM_TOLERANCE_SEC) {
+  const duration = Number(snapshot?.duration) || 0;
+  const currentTime = Math.max(0, Number(snapshot?.currentTime) || 0);
+  if (duration <= 0) {
+    return false;
+  }
+  return currentTime >= Math.max(0, duration - toleranceSec);
 }
