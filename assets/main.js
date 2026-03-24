@@ -3734,7 +3734,7 @@ function clearError() {
   }
 }
 async function helperFetch(path, options = {}) {
-  const baseUrl = state.helperUrl || DEFAULT_HELPER_URL;
+  const baseUrl = options.baseUrl || state.helperUrl || DEFAULT_HELPER_URL;
   const headers = {
     ...options.headers || {}
   };
@@ -3751,21 +3751,45 @@ async function helperFetch(path, options = {}) {
   }
   return data;
 }
-async function refreshHelper() {
+function buildHelperUrlCandidates(rawUrl) {
+  const trimmed = String(rawUrl || DEFAULT_HELPER_URL).trim() || DEFAULT_HELPER_URL;
+  const candidates = [trimmed];
   try {
-    const [health, libraryPayload] = await Promise.all([
-      helperFetch("/api/health"),
-      helperFetch("/api/library")
-    ]);
-    state.helperOnline = true;
-    state.helperMessage = `Helper online on ${health.host}:${health.port}`;
-    state.library = libraryPayload.library;
-    state.helperWarnings = [];
-  } catch (error) {
-    state.helperOnline = false;
-    state.helperMessage = error instanceof Error ? error.message : "Helper is offline.";
-    state.helperWarnings = [];
+    const parsed = new URL(trimmed);
+    if (parsed.hostname === "127.0.0.1") {
+      parsed.hostname = "localhost";
+      candidates.push(parsed.toString().replace(/\/$/, ""));
+    } else if (parsed.hostname === "localhost") {
+      parsed.hostname = "127.0.0.1";
+      candidates.push(parsed.toString().replace(/\/$/, ""));
+    }
+  } catch {
   }
+  return [...new Set(candidates)];
+}
+async function refreshHelper() {
+  let lastError = null;
+  for (const candidate of buildHelperUrlCandidates(state.helperUrl)) {
+    try {
+      const [health, libraryPayload] = await Promise.all([
+        helperFetch("/api/health", { baseUrl: candidate }),
+        helperFetch("/api/library", { baseUrl: candidate })
+      ]);
+      state.helperOnline = true;
+      state.helperUrl = candidate;
+      setHelperUrl(candidate);
+      state.helperMessage = `Helper online on ${health.host}:${health.port}`;
+      state.library = libraryPayload.library;
+      state.helperWarnings = [];
+      render();
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  state.helperOnline = false;
+  state.helperMessage = lastError instanceof Error ? lastError.message : "Helper is offline.";
+  state.helperWarnings = [];
   render();
 }
 async function refreshRoomState() {
