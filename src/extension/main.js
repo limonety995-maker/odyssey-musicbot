@@ -140,16 +140,24 @@ async function refreshHelper() {
 
   for (const candidate of buildHelperUrlCandidates(state.helperUrl)) {
     try {
-      const [health, libraryPayload] = await Promise.all([
-        helperFetch("/api/health", { baseUrl: candidate }),
-        helperFetch("/api/library", { baseUrl: candidate }),
-      ]);
+      const health = await helperFetch("/api/health", { baseUrl: candidate });
       state.helperOnline = true;
       state.helperUrl = candidate;
       setHelperUrl(candidate);
       state.helperMessage = `Helper online on ${health.host}:${health.port}`;
-      state.library = libraryPayload.library;
       state.helperWarnings = [];
+      try {
+        const libraryPayload = await helperFetch("/api/library", { baseUrl: candidate });
+        state.library = libraryPayload.library;
+      } catch (libraryError) {
+        state.library = { scenes: [] };
+        state.helperWarnings = [
+          libraryError instanceof Error
+            ? `Helper health check passed, but the scene library failed to load: ${libraryError.message}`
+            : "Helper health check passed, but the scene library failed to load.",
+        ];
+        state.helperMessage = `Helper online on ${health.host}:${health.port} (library warning)`;
+      }
       render();
       return;
     } catch (error) {
