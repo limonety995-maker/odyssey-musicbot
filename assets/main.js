@@ -3517,6 +3517,7 @@ var lib_default = OBR;
 // src/extension/shared.js
 var EXTENSION_ID = "com.limon.dnd.sync-music";
 var ROOM_STATE_KEY = `${EXTENSION_ID}/room-state`;
+var SCENE_LIBRARY_KEY = `${EXTENSION_ID}/scene-library`;
 var CLIENT_STATUS_KEY = `${EXTENSION_ID}/client-status`;
 var BROADCAST_CHANNEL = `${EXTENSION_ID}/room-state`;
 var LOCAL_CONTROL_CHANNEL = `${EXTENSION_ID}/local-control`;
@@ -3525,7 +3526,6 @@ var LOCAL_OUTPUT_VOLUME_KEY = `${EXTENSION_ID}/local-output-volume`;
 var TRANSPORT_PLAYING = "playing";
 var TRANSPORT_PAUSED = "paused";
 var TRANSPORT_STOPPED = "stopped";
-var DEFAULT_HELPER_URL = "http://127.0.0.1:19345";
 var START_LEAD_MS = 2500;
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -3544,19 +3544,6 @@ function deepClone(value) {
     return structuredClone(value);
   }
   return JSON.parse(JSON.stringify(value));
-}
-function getHelperUrl() {
-  try {
-    return localStorage.getItem(HELPER_URL_STORAGE_KEY) || DEFAULT_HELPER_URL;
-  } catch {
-    return DEFAULT_HELPER_URL;
-  }
-}
-function setHelperUrl(url) {
-  try {
-    localStorage.setItem(HELPER_URL_STORAGE_KEY, url || DEFAULT_HELPER_URL);
-  } catch {
-  }
 }
 function getLocalOutputVolume() {
   try {
@@ -3619,6 +3606,13 @@ function createEmptyRoomState() {
     layers: []
   };
 }
+function createEmptySceneLibrary() {
+  return {
+    version: 1,
+    updatedAt: safeNow(),
+    scenes: []
+  };
+}
 function ensureRoomState(value) {
   const base = createEmptyRoomState();
   if (!value || typeof value !== "object") {
@@ -3668,6 +3662,125 @@ function stripLayerForScene(layer) {
     startSeconds: layer.startSeconds
   };
 }
+function normalizeScene(scene) {
+  if (!scene || typeof scene !== "object") {
+    return null;
+  }
+  const layers = Array.isArray(scene.layers) ? scene.layers.map((layer) => stripLayerForScene(createLayer(layer))).filter((layer) => layer.sourceId) : [];
+  if (!layers.length) {
+    return null;
+  }
+  return {
+    id: typeof scene.id === "string" && scene.id.trim() ? scene.id.trim() : makeId("scene"),
+    name: typeof scene.name === "string" && scene.name.trim() ? scene.name.trim() : "Untitled scene",
+    updatedAt: Math.max(0, toNumber(scene.updatedAt, safeNow())),
+    layers
+  };
+}
+function ensureSceneLibrary(value) {
+  const base = createEmptySceneLibrary();
+  if (!value || typeof value !== "object") {
+    return base;
+  }
+  return {
+    version: 1,
+    updatedAt: Math.max(0, toNumber(value.updatedAt, safeNow())),
+    scenes: Array.isArray(value.scenes) ? value.scenes.map(normalizeScene).filter(Boolean) : []
+  };
+}
+function isYouTubeVideoId(value) {
+  return /^[A-Za-z0-9_-]{11}$/.test(value);
+}
+function isYouTubeListId(value) {
+  return /^[A-Za-z0-9_-]{10,}$/.test(value);
+}
+function parseSupportedTrackUrl(rawInput) {
+  const trimmed = String(rawInput || "").trim();
+  if (!trimmed) {
+    throw new Error("Paste a YouTube or YouTube Music link first.");
+  }
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(trimmed);
+  } catch {
+    throw new Error("This does not look like a valid URL.");
+  }
+  const host = parsedUrl.hostname.replace(/^www\./, "").toLowerCase();
+  const pathname = parsedUrl.pathname;
+  const musicHost = host === "music.youtube.com";
+  if (host === "youtu.be") {
+    const maybeVideoId = pathname.replace(/^\/+/, "").split("/")[0];
+    if (!isYouTubeVideoId(maybeVideoId)) {
+      throw new Error("Could not find a YouTube video ID in this short link.");
+    }
+    return {
+      sourceType: "video",
+      sourceId: maybeVideoId,
+      origin: "youtube",
+      url: trimmed,
+      fallbackTitle: `Track ${maybeVideoId}`,
+      warnings: []
+    };
+  }
+  if (!host.endsWith("youtube.com")) {
+    throw new Error("Only YouTube and YouTube Music links are supported.");
+  }
+  const listId = parsedUrl.searchParams.get("list");
+  const videoId = parsedUrl.searchParams.get("v");
+  const shortsMatch = pathname.match(/^\/shorts\/([A-Za-z0-9_-]{11})/);
+  const embedMatch = pathname.match(/^\/embed\/([A-Za-z0-9_-]{11})/);
+  if (pathname === "/playlist" && isYouTubeListId(listId)) {
+    return {
+      sourceType: "playlist",
+      sourceId: listId,
+      origin: musicHost ? "youtube-music" : "youtube",
+      url: trimmed,
+      fallbackTitle: `Playlist ${listId}`,
+      warnings: []
+    };
+  }
+  if (pathname === "/watch" && isYouTubeVideoId(videoId)) {
+    return {
+      sourceType: "video",
+      sourceId: videoId,
+      origin: musicHost ? "youtube-music" : "youtube",
+      url: trimmed,
+      fallbackTitle: `Track ${videoId}`,
+      warnings: listId && musicHost ? ["This YouTube Music link also contains a playlist ID, so it will be treated as a single track."] : []
+    };
+  }
+  if (pathname === "/watch" && isYouTubeListId(listId)) {
+    return {
+      sourceType: "playlist",
+      sourceId: listId,
+      origin: musicHost ? "youtube-music" : "youtube",
+      url: trimmed,
+      fallbackTitle: `Playlist ${listId}`,
+      warnings: []
+    };
+  }
+  if (shortsMatch && isYouTubeVideoId(shortsMatch[1])) {
+    return {
+      sourceType: "video",
+      sourceId: shortsMatch[1],
+      origin: "youtube",
+      url: trimmed,
+      fallbackTitle: `Track ${shortsMatch[1]}`,
+      warnings: []
+    };
+  }
+  if (embedMatch && isYouTubeVideoId(embedMatch[1])) {
+    return {
+      sourceType: "video",
+      sourceId: embedMatch[1],
+      origin: musicHost ? "youtube-music" : "youtube",
+      url: trimmed,
+      fallbackTitle: `Track ${embedMatch[1]}`,
+      warnings: []
+    };
+  }
+  throw new Error("Use a direct YouTube or YouTube Music watch/playlist link that includes a video ID or playlist ID.");
+}
 function formatSourceType(layer) {
   if (layer.sourceType === "playlist") {
     return layer.origin === "youtube-music" ? "YT Music playlist" : "YouTube playlist";
@@ -3692,12 +3805,8 @@ function summarizeTransport(roomState) {
 var root = document.getElementById("app");
 var state = {
   role: "PLAYER",
-  helperUrl: getHelperUrl(),
-  helperOnline: false,
-  helperMessage: "Helper not checked yet.",
-  helperWarnings: [],
   roomState: createEmptyRoomState(),
-  library: { scenes: [] },
+  library: createEmptySceneLibrary(),
   loading: true,
   busy: false,
   draft: {
@@ -3708,6 +3817,7 @@ var state = {
   localClientStatus: null,
   localOutputVolume: getLocalOutputVolume(),
   lastError: "",
+  notices: [],
   view: "mix"
 };
 function escapeHtml(value) {
@@ -3734,84 +3844,13 @@ function clearError() {
     render();
   }
 }
-async function helperFetch(path, options = {}) {
-  const baseUrl = options.baseUrl || state.helperUrl || DEFAULT_HELPER_URL;
-  const headers = {
-    ...options.headers || {}
-  };
-  if (options.body && !headers["Content-Type"]) {
-    headers["Content-Type"] = "application/json";
-  }
-  const response = await fetch(new URL(path, `${baseUrl}/`), {
-    ...options,
-    headers
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || data.ok === false) {
-    throw new Error(data.error || `Helper request failed with status ${response.status}.`);
-  }
-  return data;
+function setNotices(messages = []) {
+  state.notices = Array.isArray(messages) ? messages.filter(Boolean).slice(0, 4) : [];
 }
-function buildHelperUrlCandidates(rawUrl) {
-  const trimmed = String(rawUrl || DEFAULT_HELPER_URL).trim() || DEFAULT_HELPER_URL;
-  const candidates = [trimmed];
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.hostname === "127.0.0.1") {
-      parsed.hostname = "localhost";
-      candidates.push(parsed.toString().replace(/\/$/, ""));
-    } else if (parsed.hostname === "localhost") {
-      parsed.hostname = "127.0.0.1";
-      candidates.push(parsed.toString().replace(/\/$/, ""));
-    }
-  } catch {
-  }
-  return [...new Set(candidates)];
-}
-function setPlayerHelperState() {
-  state.helperOnline = false;
-  state.helperWarnings = [];
-  state.helperMessage = "Players do not need a local helper on this device.";
-}
-async function refreshHelper() {
-  if (!isGm()) {
-    setPlayerHelperState();
-    render();
-    return;
-  }
-  let lastError = null;
-  for (const candidate of buildHelperUrlCandidates(state.helperUrl)) {
-    try {
-      const health = await helperFetch("/api/health", { baseUrl: candidate });
-      state.helperOnline = true;
-      state.helperUrl = candidate;
-      setHelperUrl(candidate);
-      state.helperMessage = `Helper online on ${health.host}:${health.port}`;
-      state.helperWarnings = [];
-      try {
-        const libraryPayload = await helperFetch("/api/library", { baseUrl: candidate });
-        state.library = libraryPayload.library;
-      } catch (libraryError) {
-        state.library = { scenes: [] };
-        state.helperWarnings = [
-          libraryError instanceof Error ? `Helper health check passed, but the scene library failed to load: ${libraryError.message}` : "Helper health check passed, but the scene library failed to load."
-        ];
-        state.helperMessage = `Helper online on ${health.host}:${health.port} (library warning)`;
-      }
-      render();
-      return;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  state.helperOnline = false;
-  state.helperMessage = lastError instanceof Error ? lastError.message : "Helper is offline.";
-  state.helperWarnings = [];
-  render();
-}
-async function refreshRoomState() {
+async function refreshRoomData() {
   const metadata = await lib_default.room.getMetadata();
   state.roomState = ensureRoomState(metadata[ROOM_STATE_KEY]);
+  state.library = ensureSceneLibrary(metadata[SCENE_LIBRARY_KEY]);
 }
 async function refreshLocalClientStatus() {
   const metadata = await lib_default.player.getMetadata();
@@ -3855,6 +3894,24 @@ async function mutateRoomState(mutator) {
   }
   draft.revision = current2.revision + 1;
   await pushRoomState(draft);
+}
+async function pushSceneLibrary(nextLibrary) {
+  const normalized = ensureSceneLibrary(nextLibrary);
+  await lib_default.room.setMetadata({
+    [SCENE_LIBRARY_KEY]: normalized
+  });
+  state.library = normalized;
+}
+async function mutateSceneLibrary(mutator) {
+  const metadata = await lib_default.room.getMetadata();
+  const current2 = ensureSceneLibrary(metadata[SCENE_LIBRARY_KEY]);
+  const draft = deepClone(current2);
+  const changed = mutator(draft, current2);
+  if (changed === false) {
+    return;
+  }
+  draft.updatedAt = safeNow();
+  await pushSceneLibrary(draft);
 }
 function buildPlayStateFromCurrent(currentState) {
   const now = safeNow();
@@ -3934,20 +3991,23 @@ async function handleAddTrack() {
   setBusy(true);
   clearError();
   try {
-    const resolved = await helperFetch("/api/resolve", {
-      method: "POST",
-      body: JSON.stringify({
-        url,
-        title: state.draft.title.trim()
-      })
+    const resolved = parseSupportedTrackUrl(url);
+    setNotices(resolved.warnings);
+    await addResolvedTrack({
+      title: state.draft.title.trim() || resolved.fallbackTitle,
+      url: resolved.url,
+      sourceType: resolved.sourceType,
+      sourceId: resolved.sourceId,
+      origin: resolved.origin,
+      volume: 100,
+      loop: false,
+      startSeconds: 0
     });
-    state.helperWarnings = Array.isArray(resolved.warnings) ? resolved.warnings : [];
-    await addResolvedTrack(resolved.track);
     state.draft.url = "";
     state.draft.title = "";
-    await refreshHelper();
+    render();
   } catch (error) {
-    setError(error instanceof Error ? error.message : "Failed to resolve track.");
+    setError(error instanceof Error ? error.message : "Failed to add track.");
   } finally {
     setBusy(false);
   }
@@ -4013,7 +4073,7 @@ async function handleMasterVolume(volume) {
 async function handlePlayScene(sceneId) {
   const scene = state.library.scenes.find((entry) => entry.id === sceneId);
   if (!scene) {
-    setError("Scene not found in helper library.");
+    setError("Scene not found in this room.");
     return;
   }
   await mutateRoomState((draft) => {
@@ -4041,19 +4101,24 @@ async function handleSaveCurrentScene() {
   setBusy(true);
   clearError();
   try {
-    const payload = {
-      scene: {
-        id: state.library.scenes.some((entry) => entry.id === state.roomState.activeScene?.id) ? state.roomState.activeScene.id : void 0,
+    await mutateSceneLibrary((draft, current2) => {
+      const existingId = current2.scenes.some((entry) => entry.id === state.roomState.activeScene?.id) ? state.roomState.activeScene.id : makeId("scene");
+      const nextScene = {
+        id: existingId,
         name: sceneName,
+        updatedAt: safeNow(),
         layers: state.roomState.layers.map(stripLayerForScene)
+      };
+      const existingIndex = draft.scenes.findIndex((entry) => entry.id === existingId);
+      if (existingIndex >= 0) {
+        draft.scenes[existingIndex] = nextScene;
+      } else {
+        draft.scenes.unshift(nextScene);
       }
-    };
-    await helperFetch("/api/scenes", {
-      method: "POST",
-      body: JSON.stringify(payload)
     });
     state.draft.sceneName = "";
-    await refreshHelper();
+    setNotices(["Scenes are now stored inside the Owlbear room, so no local helper is required."]);
+    render();
   } catch (error) {
     setError(error instanceof Error ? error.message : "Failed to save scene.");
   } finally {
@@ -4064,10 +4129,13 @@ async function handleDeleteScene(sceneId) {
   setBusy(true);
   clearError();
   try {
-    await helperFetch(`/api/scenes/${encodeURIComponent(sceneId)}`, {
-      method: "DELETE"
+    await mutateSceneLibrary((draft) => {
+      const nextScenes = draft.scenes.filter((scene) => scene.id !== sceneId);
+      if (nextScenes.length === draft.scenes.length) {
+        return false;
+      }
+      draft.scenes = nextScenes;
     });
-    await refreshHelper();
   } catch (error) {
     setError(error instanceof Error ? error.message : "Failed to delete scene.");
   } finally {
@@ -4115,13 +4183,21 @@ function getCurrentView() {
 function countPlayingLayers() {
   return state.roomState.layers.filter((layer) => layer.runtime.status === TRANSPORT_PLAYING).length;
 }
+function renderNoticePanel() {
+  if (!state.notices.length) {
+    return "";
+  }
+  return `
+    <section class="panel warning-box">
+      ${state.notices.map((entry) => `<p>${escapeHtml(entry)}</p>`).join("")}
+    </section>
+  `;
+}
 function renderCommandDeck() {
-  const helperClass = state.helperOnline ? "pill success" : "pill warning";
   const roleClass = isGm() ? "pill accent" : "pill";
   const transportClass = state.roomState.transport.status === TRANSPORT_PLAYING ? "pill success" : state.roomState.transport.status === TRANSPORT_PAUSED ? "pill warning" : "pill";
   const disabled = !isGm() || !state.roomState.layers.length || state.busy;
   const currentView = getCurrentView();
-  const helperPill = isGm() ? `<span class="${helperClass}">${escapeHtml(state.helperOnline ? "Helper online" : "Helper offline")}</span>` : `<span class="pill">Local player</span>`;
   return `
     <section class="panel command-deck">
       <div class="command-copy">
@@ -4130,7 +4206,7 @@ function renderCommandDeck() {
         <p>${escapeHtml(summarizeTransport(state.roomState))}</p>
       </div>
       <div class="hero-pills">
-        ${helperPill}
+        <span class="pill success">No helper mode</span>
         <span class="${roleClass}">${escapeHtml(state.role)}</span>
         <span class="${transportClass}">${escapeHtml(state.roomState.transport.status)}</span>
       </div>
@@ -4182,48 +4258,8 @@ function renderMixOverview() {
       <article class="panel stat-card">
         <span class="stat-label">Saved scenes</span>
         <strong>${sceneCount}</strong>
-        <span class="muted">${escapeHtml(state.roomState.activeScene?.name || "Live mix")}</span>
+        <span class="muted">Shared with this room</span>
       </article>
-    </section>
-  `;
-}
-function renderMixView() {
-  return `
-    ${renderMixOverview()}
-    ${renderBrowserStatusPanel()}
-    ${renderHelperPanel()}
-    ${renderAddTrackPanel()}
-    ${renderActiveLayers()}
-    ${renderLimitationsPanel()}
-  `;
-}
-function renderScenesView() {
-  if (!isGm()) {
-    return renderMixView();
-  }
-  return `
-    ${renderBrowserStatusPanel()}
-    ${renderHelperPanel()}
-    ${renderScenesPanel()}
-    ${renderLimitationsPanel()}
-  `;
-}
-function renderHelperPanel() {
-  if (!isGm()) {
-    return "";
-  }
-  return `
-    <section class="panel helper-panel">
-      <div class="section-row">
-        <div>
-          <h2>GM helper</h2>
-          <p class="muted">${escapeHtml(state.helperMessage)}</p>
-        </div>
-        <button class="ghost-button" data-action="refresh-helper">Reconnect</button>
-      </div>
-      <label class="field-label" for="helper-url">Helper URL</label>
-      <input id="helper-url" name="helperUrl" type="url" value="${escapeHtml(state.helperUrl)}" placeholder="${escapeHtml(DEFAULT_HELPER_URL)}" />
-      ${state.helperWarnings.length ? `<div class="warning-box">${state.helperWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}
     </section>
   `;
 }
@@ -4289,14 +4325,6 @@ function renderBrowserStatusPanel() {
     </section>
   `;
 }
-function renderLoadingState() {
-  return `
-    <div class="loading-state">
-      <div class="spinner"></div>
-      <p>Loading Sync Music MVP...</p>
-    </div>
-  `;
-}
 function renderAddTrackPanel() {
   if (!isGm()) {
     return "";
@@ -4306,7 +4334,7 @@ function renderAddTrackPanel() {
       <div class="section-row">
         <div>
           <h2>Queue a new layer</h2>
-          <p class="muted">Drop in a YouTube or YouTube Music link and add it straight to the live mix.</p>
+          <p class="muted">Paste a direct YouTube or YouTube Music watch link and add it straight to the live mix.</p>
         </div>
         <button class="action-button" data-action="add-track" ${state.busy ? "disabled" : ""}>Add to mix</button>
       </div>
@@ -4314,7 +4342,7 @@ function renderAddTrackPanel() {
       <input id="track-url" name="draftUrl" type="url" value="${escapeHtml(state.draft.url)}" placeholder="https://www.youtube.com/watch?v=..." />
       <label class="field-label" for="track-title">Custom title</label>
       <input id="track-title" name="draftTitle" type="text" value="${escapeHtml(state.draft.title)}" placeholder="Optional scene-friendly title" />
-      <p class="muted">Best support is for direct watch links and playlist links that expose a <code>v=</code> or <code>list=</code> ID.</p>
+      <p class="muted">No helper is required now, but the link must expose a playable <code>v=</code> or <code>list=</code> ID.</p>
     </section>
   `;
 }
@@ -4403,9 +4431,8 @@ function renderScenesPanel() {
       <div class="section-row">
         <div>
           <h2>Scene library</h2>
-          <p class="muted">Reusable presets for ambience stacks, music combos, and encounter setups.</p>
+          <p class="muted">Scenes are now stored inside the Owlbear room, so any GM opening this room can use them.</p>
         </div>
-        <button class="ghost-button" data-action="refresh-helper">Refresh</button>
       </div>
       <label class="field-label" for="scene-name">Save current mix as a scene</label>
       <div class="inline-form">
@@ -4421,13 +4448,42 @@ function renderLimitationsPanel() {
     <section class="panel">
       <h2>Reality check</h2>
       <ul class="plain-list">
-        <li>YouTube playback works through the official IFrame API.</li>
-        <li>YouTube Music works when the helper can resolve the link to a normal YouTube video or playlist ID.</li>
-        <li>YouTube ads on embedded videos are controlled by YouTube. This extension can reduce reload churn, but it cannot force ad-free playback.</li>
+        <li>No helper is required anymore. Everything important now runs inside the Owlbear extension.</li>
+        <li>Only direct YouTube and YouTube Music links that expose a video ID or playlist ID are supported.</li>
+        <li>Some YouTube Music share links that rely on page resolution may no longer work without manual cleanup.</li>
+        <li>YouTube ads on embedded videos are still controlled by YouTube.</li>
         <li>If a video forbids embeds, YouTube will return error 101 or 150 and this browser will show a warning.</li>
-        <li>If autoplay is blocked, each affected browser needs one click in this panel to unlock audio locally.</li>
       </ul>
     </section>
+  `;
+}
+function renderMixView() {
+  return `
+    ${renderMixOverview()}
+    ${renderNoticePanel()}
+    ${renderBrowserStatusPanel()}
+    ${renderAddTrackPanel()}
+    ${renderActiveLayers()}
+    ${renderLimitationsPanel()}
+  `;
+}
+function renderScenesView() {
+  if (!isGm()) {
+    return renderMixView();
+  }
+  return `
+    ${renderNoticePanel()}
+    ${renderBrowserStatusPanel()}
+    ${renderScenesPanel()}
+    ${renderLimitationsPanel()}
+  `;
+}
+function renderLoadingState() {
+  return `
+    <div class="loading-state">
+      <div class="spinner"></div>
+      <p>Loading Sync Music MVP...</p>
+    </div>
   `;
 }
 function render() {
@@ -4436,15 +4492,6 @@ function render() {
   }
   if (state.loading) {
     root.innerHTML = renderLoadingState();
-    return;
-  }
-  if (state.loading) {
-    root.innerHTML = `
-      <div class="loading-state">
-        <div class="spinner"></div>
-        <p>Loading Sync Music MVP\u2026</p>
-      </div>
-    `;
     return;
   }
   root.innerHTML = `
@@ -4460,11 +4507,6 @@ function render() {
 root?.addEventListener("input", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLInputElement)) {
-    return;
-  }
-  if (target.name === "helperUrl") {
-    state.helperUrl = target.value.trim() || DEFAULT_HELPER_URL;
-    setHelperUrl(state.helperUrl);
     return;
   }
   if (target.name === "draftUrl") {
@@ -4527,9 +4569,6 @@ root?.addEventListener("click", async (event) => {
           render();
         }
         break;
-      case "refresh-helper":
-        await refreshHelper();
-        break;
       case "add-track":
         await handleAddTrack();
         break;
@@ -4575,26 +4614,18 @@ root?.addEventListener("click", async (event) => {
 });
 lib_default.onReady(async () => {
   state.role = await lib_default.player.getRole();
-  if (!isGm()) {
-    setPlayerHelperState();
-  }
   await Promise.all([
-    refreshRoomState(),
+    refreshRoomData(),
     refreshLocalClientStatus()
   ]);
   lib_default.room.onMetadataChange((metadata) => {
     state.roomState = ensureRoomState(metadata[ROOM_STATE_KEY]);
+    state.library = ensureSceneLibrary(metadata[SCENE_LIBRARY_KEY]);
     render();
   });
   lib_default.player.onChange((player) => {
     state.role = player.role;
     syncLocalStatusFromPlayer(player);
-    if (state.role === "GM") {
-      refreshHelper().catch(() => {
-      });
-    } else {
-      setPlayerHelperState();
-    }
     render();
   });
   lib_default.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {
@@ -4605,7 +4636,4 @@ lib_default.onReady(async () => {
   });
   state.loading = false;
   render();
-  if (isGm()) {
-    await refreshHelper();
-  }
 });

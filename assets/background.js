@@ -3517,6 +3517,7 @@ var lib_default = OBR;
 // src/extension/shared.js
 var EXTENSION_ID = "com.limon.dnd.sync-music";
 var ROOM_STATE_KEY = `${EXTENSION_ID}/room-state`;
+var SCENE_LIBRARY_KEY = `${EXTENSION_ID}/scene-library`;
 var CLIENT_STATUS_KEY = `${EXTENSION_ID}/client-status`;
 var BROADCAST_CHANNEL = `${EXTENSION_ID}/room-state`;
 var LOCAL_CONTROL_CHANNEL = `${EXTENSION_ID}/local-control`;

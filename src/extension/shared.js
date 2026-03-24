@@ -1,5 +1,6 @@
 export const EXTENSION_ID = "com.limon.dnd.sync-music";
 export const ROOM_STATE_KEY = `${EXTENSION_ID}/room-state`;
+export const SCENE_LIBRARY_KEY = `${EXTENSION_ID}/scene-library`;
 export const CLIENT_STATUS_KEY = `${EXTENSION_ID}/client-status`;
 export const BROADCAST_CHANNEL = `${EXTENSION_ID}/room-state`;
 export const LOCAL_CONTROL_CHANNEL = `${EXTENSION_ID}/local-control`;
@@ -132,6 +133,14 @@ export function createEmptyRoomState() {
   };
 }
 
+export function createEmptySceneLibrary() {
+  return {
+    version: 1,
+    updatedAt: safeNow(),
+    scenes: [],
+  };
+}
+
 export function ensureRoomState(value) {
   const base = createEmptyRoomState();
   if (!value || typeof value !== "object") {
@@ -194,6 +203,147 @@ export function stripLayerForScene(layer) {
     loop: layer.loop,
     startSeconds: layer.startSeconds,
   };
+}
+
+function normalizeScene(scene) {
+  if (!scene || typeof scene !== "object") {
+    return null;
+  }
+  const layers = Array.isArray(scene.layers)
+    ? scene.layers.map((layer) => stripLayerForScene(createLayer(layer))).filter((layer) => layer.sourceId)
+    : [];
+  if (!layers.length) {
+    return null;
+  }
+  return {
+    id: typeof scene.id === "string" && scene.id.trim() ? scene.id.trim() : makeId("scene"),
+    name: typeof scene.name === "string" && scene.name.trim() ? scene.name.trim() : "Untitled scene",
+    updatedAt: Math.max(0, toNumber(scene.updatedAt, safeNow())),
+    layers,
+  };
+}
+
+export function ensureSceneLibrary(value) {
+  const base = createEmptySceneLibrary();
+  if (!value || typeof value !== "object") {
+    return base;
+  }
+  return {
+    version: 1,
+    updatedAt: Math.max(0, toNumber(value.updatedAt, safeNow())),
+    scenes: Array.isArray(value.scenes)
+      ? value.scenes.map(normalizeScene).filter(Boolean)
+      : [],
+  };
+}
+
+function isYouTubeVideoId(value) {
+  return /^[A-Za-z0-9_-]{11}$/.test(value);
+}
+
+function isYouTubeListId(value) {
+  return /^[A-Za-z0-9_-]{10,}$/.test(value);
+}
+
+export function parseSupportedTrackUrl(rawInput) {
+  const trimmed = String(rawInput || "").trim();
+  if (!trimmed) {
+    throw new Error("Paste a YouTube or YouTube Music link first.");
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(trimmed);
+  } catch {
+    throw new Error("This does not look like a valid URL.");
+  }
+
+  const host = parsedUrl.hostname.replace(/^www\./, "").toLowerCase();
+  const pathname = parsedUrl.pathname;
+  const musicHost = host === "music.youtube.com";
+
+  if (host === "youtu.be") {
+    const maybeVideoId = pathname.replace(/^\/+/, "").split("/")[0];
+    if (!isYouTubeVideoId(maybeVideoId)) {
+      throw new Error("Could not find a YouTube video ID in this short link.");
+    }
+    return {
+      sourceType: "video",
+      sourceId: maybeVideoId,
+      origin: "youtube",
+      url: trimmed,
+      fallbackTitle: `Track ${maybeVideoId}`,
+      warnings: [],
+    };
+  }
+
+  if (!host.endsWith("youtube.com")) {
+    throw new Error("Only YouTube and YouTube Music links are supported.");
+  }
+
+  const listId = parsedUrl.searchParams.get("list");
+  const videoId = parsedUrl.searchParams.get("v");
+  const shortsMatch = pathname.match(/^\/shorts\/([A-Za-z0-9_-]{11})/);
+  const embedMatch = pathname.match(/^\/embed\/([A-Za-z0-9_-]{11})/);
+
+  if (pathname === "/playlist" && isYouTubeListId(listId)) {
+    return {
+      sourceType: "playlist",
+      sourceId: listId,
+      origin: musicHost ? "youtube-music" : "youtube",
+      url: trimmed,
+      fallbackTitle: `Playlist ${listId}`,
+      warnings: [],
+    };
+  }
+
+  if (pathname === "/watch" && isYouTubeVideoId(videoId)) {
+    return {
+      sourceType: "video",
+      sourceId: videoId,
+      origin: musicHost ? "youtube-music" : "youtube",
+      url: trimmed,
+      fallbackTitle: `Track ${videoId}`,
+      warnings: listId && musicHost
+        ? ["This YouTube Music link also contains a playlist ID, so it will be treated as a single track."]
+        : [],
+    };
+  }
+
+  if (pathname === "/watch" && isYouTubeListId(listId)) {
+    return {
+      sourceType: "playlist",
+      sourceId: listId,
+      origin: musicHost ? "youtube-music" : "youtube",
+      url: trimmed,
+      fallbackTitle: `Playlist ${listId}`,
+      warnings: [],
+    };
+  }
+
+  if (shortsMatch && isYouTubeVideoId(shortsMatch[1])) {
+    return {
+      sourceType: "video",
+      sourceId: shortsMatch[1],
+      origin: "youtube",
+      url: trimmed,
+      fallbackTitle: `Track ${shortsMatch[1]}`,
+      warnings: [],
+    };
+  }
+
+  if (embedMatch && isYouTubeVideoId(embedMatch[1])) {
+    return {
+      sourceType: "video",
+      sourceId: embedMatch[1],
+      origin: musicHost ? "youtube-music" : "youtube",
+      url: trimmed,
+      fallbackTitle: `Track ${embedMatch[1]}`,
+      warnings: [],
+    };
+  }
+
+  throw new Error("Use a direct YouTube or YouTube Music watch/playlist link that includes a video ID or playlist ID.");
 }
 
 export function formatSourceType(layer) {
