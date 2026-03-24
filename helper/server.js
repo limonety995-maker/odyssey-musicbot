@@ -64,22 +64,29 @@ async function saveLibrary(library) {
   return normalized;
 }
 
-function jsonHeaders() {
+function jsonHeaders(request = null) {
+  const requestedOrigin = request?.headers?.origin;
+  const requestedHeaders = request?.headers?.["access-control-request-headers"];
+  const privateNetworkRequest = request?.headers?.["access-control-request-private-network"] === "true";
+
   return {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": requestedOrigin || "*",
     "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": requestedHeaders || "Content-Type",
+    "Access-Control-Allow-Private-Network": privateNetworkRequest ? "true" : "false",
+    "Access-Control-Max-Age": "600",
     "Content-Type": "application/json; charset=utf-8",
+    "Vary": "Origin, Access-Control-Request-Headers, Access-Control-Request-Private-Network",
   };
 }
 
-function sendJson(response, statusCode, data) {
-  response.writeHead(statusCode, jsonHeaders());
+function sendJson(request, response, statusCode, data) {
+  response.writeHead(statusCode, jsonHeaders(request));
   response.end(JSON.stringify(data));
 }
 
-function sendError(response, statusCode, message, details = null) {
-  sendJson(response, statusCode, {
+function sendError(request, response, statusCode, message, details = null) {
+  sendJson(request, response, statusCode, {
     ok: false,
     error: message,
     details,
@@ -435,12 +442,12 @@ function pathSceneId(urlPathname) {
 
 const server = http.createServer(async (request, response) => {
   if (!request.url) {
-    sendError(response, 400, "Missing request URL.");
+    sendError(request, response, 400, "Missing request URL.");
     return;
   }
 
   if (request.method === "OPTIONS") {
-    response.writeHead(204, jsonHeaders());
+    response.writeHead(204, jsonHeaders(request));
     response.end();
     return;
   }
@@ -450,7 +457,7 @@ const server = http.createServer(async (request, response) => {
   try {
     if (request.method === "GET" && url.pathname === "/api/health") {
       const library = await loadLibrary();
-      sendJson(response, 200, {
+      sendJson(request, response, 200, {
         ok: true,
         host: HOST,
         port: PORT,
@@ -461,7 +468,7 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "GET" && url.pathname === "/api/library") {
       const library = await loadLibrary();
-      sendJson(response, 200, {
+      sendJson(request, response, 200, {
         ok: true,
         library,
       });
@@ -471,20 +478,20 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/resolve") {
       const payload = await readJsonBody(request);
       const resolved = await handleResolveTrack(payload);
-      sendJson(response, 200, resolved);
+      sendJson(request, response, 200, resolved);
       return;
     }
 
     if (request.method === "POST" && url.pathname === "/api/scenes") {
       const payload = await readJsonBody(request);
       if (!payload.scene || typeof payload.scene !== "object") {
-        sendError(response, 400, "Request must include a scene object.");
+        sendError(request, response, 400, "Request must include a scene object.");
         return;
       }
 
       const scene = normalizeStoredScene(payload.scene);
       if (!scene) {
-        sendError(response, 400, "Scene must have a name and at least one valid layer.");
+        sendError(request, response, 400, "Scene must have a name and at least one valid layer.");
         return;
       }
 
@@ -501,7 +508,7 @@ const server = http.createServer(async (request, response) => {
       }
 
       const saved = await saveLibrary(library);
-      sendJson(response, 200, {
+      sendJson(request, response, 200, {
         ok: true,
         library: saved,
         scene,
@@ -512,7 +519,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "DELETE" && url.pathname.startsWith("/api/scenes/")) {
       const sceneId = pathSceneId(url.pathname);
       if (!sceneId) {
-        sendError(response, 400, "Missing scene ID.");
+        sendError(request, response, 400, "Missing scene ID.");
         return;
       }
 
@@ -522,16 +529,17 @@ const server = http.createServer(async (request, response) => {
         ...library,
         scenes: nextScenes,
       });
-      sendJson(response, 200, {
+      sendJson(request, response, 200, {
         ok: true,
         library: saved,
       });
       return;
     }
 
-    sendError(response, 404, "Route not found.");
+    sendError(request, response, 404, "Route not found.");
   } catch (error) {
     sendError(
+      request,
       response,
       500,
       error instanceof Error ? error.message : "Unexpected server error.",
