@@ -19,10 +19,16 @@ import {
   safeNow,
   setLocalOutputVolume,
 } from "./shared.js";
+import {
+  buildRoomStateApplyKey,
+  shouldRecoverPlayback,
+  shouldResetSyncLoopForRoleChange,
+  shouldSkipRedundantPlaybackApply,
+  shouldWritePeriodicSyncUpdate,
+} from "./sync-logic.js";
 
 const playerHost = document.getElementById("youtube-player-host");
 const statusElement = document.getElementById("background-status");
-const RESYNC_DRIFT_THRESHOLD_SEC = 2.5;
 
 let currentRoomState = createEmptyRoomState();
 let isGm = false;
@@ -31,6 +37,7 @@ let statusState = createClientStatus();
 let writeInFlight = false;
 let youtubeApiPromise = null;
 let localOutputVolume = getLocalOutputVolume();
+let lastAppliedRoomStateKey = buildRoomStateApplyKey(currentRoomState);
 
 const slots = new Map();
 
@@ -467,10 +474,27 @@ async function applyLayerState(layer, transport) {
   }
 
   clearScheduledPlay(slot);
+  const hadSamePlan = slot.playPlanKey === planKey;
   const sourceChanged = await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
   const snapshot = await getPlayerSnapshot(slot);
   slot.playPlanKey = planKey;
-  if (sourceChanged || !isPlayingState(snapshot.playerState)) {
+  if (shouldSkipRedundantPlaybackApply(
+    {
+      hadSamePlan,
+      sourceChanged,
+      playerState: snapshot.playerState,
+    },
+    window.YT?.PlayerState || {},
+  )) {
+    return;
+  }
+  if (shouldRecoverPlayback(
+    {
+      sourceChanged,
+      playerState: snapshot.playerState,
+    },
+    window.YT?.PlayerState || {},
+  )) {
     await startLayerPlayback(slot, layer, sourceChanged ? "Prepared play" : "Recovered play");
     return;
   }
@@ -490,7 +514,13 @@ async function applyLocalVolumeToActiveSlots() {
 }
 
 async function applyRoomState(roomState) {
-  currentRoomState = ensureRoomState(roomState);
+  const normalizedRoomState = ensureRoomState(roomState);
+  const nextRoomStateKey = buildRoomStateApplyKey(normalizedRoomState);
+  currentRoomState = normalizedRoomState;
+  if (lastAppliedRoomStateKey === nextRoomStateKey) {
+    return;
+  }
+  lastAppliedRoomStateKey = nextRoomStateKey;
   const activeLayerIds = new Set(currentRoomState.layers.map((layer) => layer.id));
 
   for (const slotId of Array.from(slots.keys())) {
@@ -526,6 +556,7 @@ async function applyRoomState(roomState) {
 async function writeRoomState(nextState, shouldBroadcast = true) {
   const normalized = ensureRoomState(nextState);
   normalized.revision = currentRoomState.revision + 1;
+  lastAppliedRoomStateKey = buildRoomStateApplyKey(normalized);
   currentRoomState = normalized;
   await OBR.room.setMetadata({
     [ROOM_STATE_KEY]: normalized,
@@ -688,16 +719,7 @@ async function gmPeriodicSync() {
         changed = true;
         continue;
       }
-      const expectedPosition = computeLayerPosition(layer, now);
-      const playlistChanged = layer.sourceType === "playlist"
-        && (
-          snapshot.playlistIndex !== layer.runtime.playlistIndex
-          || snapshot.videoId !== layer.runtime.playlistVideoId
-        );
-      if (
-        Math.abs(snapshot.currentTime - expectedPosition) > RESYNC_DRIFT_THRESHOLD_SEC
-        || playlistChanged
-      ) {
+      if (shouldWritePeriodicSyncUpdate(layer, snapshot)) {
         layer.runtime.pauseOffsetSec = snapshot.currentTime;
         layer.runtime.playingSince = now;
         if (layer.sourceType === "playlist") {
@@ -782,7 +804,9 @@ OBR.onReady(async () => {
       localOutputVolume = normalizeVolumeValue(event.data?.volume);
       setLocalOutputVolume(localOutputVolume);
       applyLocalVolumeToActiveSlots()
-        .then(() => publishClientStatus({}))
+        .then(() => publishClientStatus({
+          lastAction: `Local output volume set to ${localOutputVolume}%`,
+        }))
         .catch(() => {
           // Ignore local volume update failures.
         });
@@ -790,7 +814,9 @@ OBR.onReady(async () => {
   });
 
   OBR.player.onChange((player) => {
-    isGm = player.role === "GM";
-    resetSyncLoop();
+    if (shouldResetSyncLoopForRoleChange(isGm, player.role)) {
+      isGm = player.role === "GM";
+      resetSyncLoop();
+    }
   });
 });

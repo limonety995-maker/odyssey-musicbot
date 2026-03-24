@@ -3534,12 +3534,6 @@ function clamp(value, min, max) {
 function safeNow() {
   return Date.now();
 }
-function makeId(prefix = "id") {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return `${prefix}-${crypto.randomUUID()}`;
-  }
-  return `${prefix}-${safeNow()}-${Math.random().toString(36).slice(2, 10)}`;
-}
 function deepClone(value) {
   if (typeof structuredClone === "function") {
     return structuredClone(value);
@@ -3570,11 +3564,22 @@ function toNumber(value, fallback) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
 }
-function createLayer(source = {}) {
+function slugIdPart(value) {
+  return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+}
+function buildStableFallbackId(prefix, parts = [], fallbackIndex = 0) {
+  const slug = parts.map(slugIdPart).filter(Boolean).join("-");
+  return `${prefix}-${slug || "item"}-${Math.max(0, toNumber(fallbackIndex, 0))}`;
+}
+function createLayer(source = {}, fallbackIndex = 0) {
   const startSeconds = Math.max(0, toNumber(source.startSeconds, 0));
   const sourceType = source.sourceType === "playlist" ? "playlist" : "video";
   return {
-    id: typeof source.id === "string" && source.id.trim() ? source.id.trim() : makeId("layer"),
+    id: typeof source.id === "string" && source.id.trim() ? source.id.trim() : buildStableFallbackId(
+      "layer",
+      [source.origin, sourceType, source.sourceId, source.title, startSeconds],
+      fallbackIndex
+    ),
     title: typeof source.title === "string" && source.title.trim() ? source.title.trim() : sourceType === "playlist" ? `Playlist ${source.sourceId || ""}`.trim() : `Track ${source.sourceId || ""}`.trim(),
     url: typeof source.url === "string" ? source.url : "",
     sourceType,
@@ -3608,26 +3613,38 @@ function createEmptyRoomState() {
   };
 }
 function ensureRoomState(value) {
-  const base = createEmptyRoomState();
   if (!value || typeof value !== "object") {
-    return base;
+    return {
+      version: 1,
+      revision: 0,
+      activeScene: null,
+      transport: {
+        status: TRANSPORT_STOPPED,
+        masterVolume: 85,
+        changedAt: 0
+      },
+      layers: []
+    };
   }
   const transportStatus = value.transport?.status;
   const transport = {
     status: transportStatus === TRANSPORT_PLAYING ? TRANSPORT_PLAYING : transportStatus === TRANSPORT_PAUSED ? TRANSPORT_PAUSED : TRANSPORT_STOPPED,
     masterVolume: clamp(toNumber(value.transport?.masterVolume, 85), 0, 100),
-    changedAt: Math.max(0, toNumber(value.transport?.changedAt, safeNow()))
+    changedAt: Math.max(0, toNumber(value.transport?.changedAt, 0))
   };
   return {
     version: 1,
     revision: Math.max(0, toNumber(value.revision, 0)),
     activeScene: value.activeScene && typeof value.activeScene === "object" ? {
-      id: typeof value.activeScene.id === "string" ? value.activeScene.id : makeId("scene"),
+      id: typeof value.activeScene.id === "string" && value.activeScene.id.trim() ? value.activeScene.id.trim() : buildStableFallbackId("scene", [value.activeScene.name || "live-mix"]),
       name: typeof value.activeScene.name === "string" && value.activeScene.name.trim() ? value.activeScene.name.trim() : "Live mix"
     } : null,
     transport,
-    layers: Array.isArray(value.layers) ? value.layers.map(createLayer).filter((layer) => layer.sourceId) : []
+    layers: Array.isArray(value.layers) ? value.layers.map((layer, index) => createLayer(layer, index)).filter((layer) => layer.sourceId) : []
   };
+}
+function buildRoomStateApplyKey(roomState) {
+  return JSON.stringify(ensureRoomState(roomState));
 }
 function computeLayerPosition(layer, at = safeNow()) {
   if (!layer) {
@@ -3660,10 +3677,36 @@ function createClientStatus(partial = {}) {
   };
 }
 
+// src/extension/sync-logic.js
+function buildRoomStateApplyKey2(roomState) {
+  return buildRoomStateApplyKey(roomState);
+}
+function isActivePlaybackState(playerState, playerStates = {}) {
+  return playerState === playerStates.PLAYING || playerState === playerStates.BUFFERING;
+}
+function shouldSkipRedundantPlaybackApply({
+  hadSamePlan,
+  sourceChanged,
+  playerState
+}, playerStates = {}) {
+  return !sourceChanged && hadSamePlan && isActivePlaybackState(playerState, playerStates);
+}
+function shouldRecoverPlayback({
+  sourceChanged,
+  playerState
+}, playerStates = {}) {
+  return sourceChanged || !isActivePlaybackState(playerState, playerStates);
+}
+function shouldResetSyncLoopForRoleChange(currentIsGm, nextRole) {
+  return currentIsGm !== (nextRole === "GM");
+}
+function shouldWritePeriodicSyncUpdate(layer, snapshot) {
+  return layer?.sourceType === "playlist" && (snapshot?.playlistIndex !== layer.runtime?.playlistIndex || snapshot?.videoId !== layer.runtime?.playlistVideoId);
+}
+
 // src/extension/background.js
 var playerHost = document.getElementById("youtube-player-host");
 var statusElement = document.getElementById("background-status");
-var RESYNC_DRIFT_THRESHOLD_SEC = 2.5;
 var currentRoomState = createEmptyRoomState();
 var isGm = false;
 var syncIntervalHandle = null;
@@ -3671,6 +3714,7 @@ var statusState = createClientStatus();
 var writeInFlight = false;
 var youtubeApiPromise = null;
 var localOutputVolume = getLocalOutputVolume();
+var lastAppliedRoomStateKey = buildRoomStateApplyKey2(currentRoomState);
 var slots = /* @__PURE__ */ new Map();
 function updateBackgroundStatus(text) {
   if (statusElement) {
@@ -4041,10 +4085,27 @@ async function applyLayerState(layer, transport) {
     return;
   }
   clearScheduledPlay(slot);
+  const hadSamePlan = slot.playPlanKey === planKey;
   const sourceChanged = await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
   const snapshot = await getPlayerSnapshot(slot);
   slot.playPlanKey = planKey;
-  if (sourceChanged || !isPlayingState(snapshot.playerState)) {
+  if (shouldSkipRedundantPlaybackApply(
+    {
+      hadSamePlan,
+      sourceChanged,
+      playerState: snapshot.playerState
+    },
+    window.YT?.PlayerState || {}
+  )) {
+    return;
+  }
+  if (shouldRecoverPlayback(
+    {
+      sourceChanged,
+      playerState: snapshot.playerState
+    },
+    window.YT?.PlayerState || {}
+  )) {
     await startLayerPlayback(slot, layer, sourceChanged ? "Prepared play" : "Recovered play");
     return;
   }
@@ -4061,7 +4122,13 @@ async function applyLocalVolumeToActiveSlots() {
   }
 }
 async function applyRoomState(roomState) {
-  currentRoomState = ensureRoomState(roomState);
+  const normalizedRoomState = ensureRoomState(roomState);
+  const nextRoomStateKey = buildRoomStateApplyKey2(normalizedRoomState);
+  currentRoomState = normalizedRoomState;
+  if (lastAppliedRoomStateKey === nextRoomStateKey) {
+    return;
+  }
+  lastAppliedRoomStateKey = nextRoomStateKey;
   const activeLayerIds = new Set(currentRoomState.layers.map((layer) => layer.id));
   for (const slotId of Array.from(slots.keys())) {
     if (!activeLayerIds.has(slotId)) {
@@ -4090,6 +4157,7 @@ async function applyRoomState(roomState) {
 async function writeRoomState(nextState, shouldBroadcast = true) {
   const normalized = ensureRoomState(nextState);
   normalized.revision = currentRoomState.revision + 1;
+  lastAppliedRoomStateKey = buildRoomStateApplyKey2(normalized);
   currentRoomState = normalized;
   await lib_default.room.setMetadata({
     [ROOM_STATE_KEY]: normalized
@@ -4236,9 +4304,7 @@ async function gmPeriodicSync() {
         changed = true;
         continue;
       }
-      const expectedPosition = computeLayerPosition(layer, now);
-      const playlistChanged = layer.sourceType === "playlist" && (snapshot.playlistIndex !== layer.runtime.playlistIndex || snapshot.videoId !== layer.runtime.playlistVideoId);
-      if (Math.abs(snapshot.currentTime - expectedPosition) > RESYNC_DRIFT_THRESHOLD_SEC || playlistChanged) {
+      if (shouldWritePeriodicSyncUpdate(layer, snapshot)) {
         layer.runtime.pauseOffsetSec = snapshot.currentTime;
         layer.runtime.playingSince = now;
         if (layer.sourceType === "playlist") {
@@ -4311,12 +4377,16 @@ lib_default.onReady(async () => {
     if (event.data?.type === "set-local-volume") {
       localOutputVolume = normalizeVolumeValue(event.data?.volume);
       setLocalOutputVolume(localOutputVolume);
-      applyLocalVolumeToActiveSlots().then(() => publishClientStatus({})).catch(() => {
+      applyLocalVolumeToActiveSlots().then(() => publishClientStatus({
+        lastAction: `Local output volume set to ${localOutputVolume}%`
+      })).catch(() => {
       });
     }
   });
   lib_default.player.onChange((player) => {
-    isGm = player.role === "GM";
-    resetSyncLoop();
+    if (shouldResetSyncLoopForRoleChange(isGm, player.role)) {
+      isGm = player.role === "GM";
+      resetSyncLoop();
+    }
   });
 });

@@ -3569,11 +3569,22 @@ function toNumber(value, fallback) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
 }
-function createLayer(source = {}) {
+function slugIdPart(value) {
+  return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+}
+function buildStableFallbackId(prefix, parts = [], fallbackIndex = 0) {
+  const slug = parts.map(slugIdPart).filter(Boolean).join("-");
+  return `${prefix}-${slug || "item"}-${Math.max(0, toNumber(fallbackIndex, 0))}`;
+}
+function createLayer(source = {}, fallbackIndex = 0) {
   const startSeconds = Math.max(0, toNumber(source.startSeconds, 0));
   const sourceType = source.sourceType === "playlist" ? "playlist" : "video";
   return {
-    id: typeof source.id === "string" && source.id.trim() ? source.id.trim() : makeId("layer"),
+    id: typeof source.id === "string" && source.id.trim() ? source.id.trim() : buildStableFallbackId(
+      "layer",
+      [source.origin, sourceType, source.sourceId, source.title, startSeconds],
+      fallbackIndex
+    ),
     title: typeof source.title === "string" && source.title.trim() ? source.title.trim() : sourceType === "playlist" ? `Playlist ${source.sourceId || ""}`.trim() : `Track ${source.sourceId || ""}`.trim(),
     url: typeof source.url === "string" ? source.url : "",
     sourceType,
@@ -3614,25 +3625,34 @@ function createEmptySceneLibrary() {
   };
 }
 function ensureRoomState(value) {
-  const base = createEmptyRoomState();
   if (!value || typeof value !== "object") {
-    return base;
+    return {
+      version: 1,
+      revision: 0,
+      activeScene: null,
+      transport: {
+        status: TRANSPORT_STOPPED,
+        masterVolume: 85,
+        changedAt: 0
+      },
+      layers: []
+    };
   }
   const transportStatus = value.transport?.status;
   const transport = {
     status: transportStatus === TRANSPORT_PLAYING ? TRANSPORT_PLAYING : transportStatus === TRANSPORT_PAUSED ? TRANSPORT_PAUSED : TRANSPORT_STOPPED,
     masterVolume: clamp(toNumber(value.transport?.masterVolume, 85), 0, 100),
-    changedAt: Math.max(0, toNumber(value.transport?.changedAt, safeNow()))
+    changedAt: Math.max(0, toNumber(value.transport?.changedAt, 0))
   };
   return {
     version: 1,
     revision: Math.max(0, toNumber(value.revision, 0)),
     activeScene: value.activeScene && typeof value.activeScene === "object" ? {
-      id: typeof value.activeScene.id === "string" ? value.activeScene.id : makeId("scene"),
+      id: typeof value.activeScene.id === "string" && value.activeScene.id.trim() ? value.activeScene.id.trim() : buildStableFallbackId("scene", [value.activeScene.name || "live-mix"]),
       name: typeof value.activeScene.name === "string" && value.activeScene.name.trim() ? value.activeScene.name.trim() : "Live mix"
     } : null,
     transport,
-    layers: Array.isArray(value.layers) ? value.layers.map(createLayer).filter((layer) => layer.sourceId) : []
+    layers: Array.isArray(value.layers) ? value.layers.map((layer, index) => createLayer(layer, index)).filter((layer) => layer.sourceId) : []
   };
 }
 function computeLayerPosition(layer, at = safeNow()) {
@@ -3662,30 +3682,33 @@ function stripLayerForScene(layer) {
     startSeconds: layer.startSeconds
   };
 }
-function normalizeScene(scene) {
+function normalizeScene(scene, fallbackIndex = 0) {
   if (!scene || typeof scene !== "object") {
     return null;
   }
-  const layers = Array.isArray(scene.layers) ? scene.layers.map((layer) => stripLayerForScene(createLayer(layer))).filter((layer) => layer.sourceId) : [];
+  const layers = Array.isArray(scene.layers) ? scene.layers.map((layer, index) => stripLayerForScene(createLayer(layer, index))).filter((layer) => layer.sourceId) : [];
   if (!layers.length) {
     return null;
   }
   return {
-    id: typeof scene.id === "string" && scene.id.trim() ? scene.id.trim() : makeId("scene"),
+    id: typeof scene.id === "string" && scene.id.trim() ? scene.id.trim() : buildStableFallbackId("scene", [scene.name], fallbackIndex),
     name: typeof scene.name === "string" && scene.name.trim() ? scene.name.trim() : "Untitled scene",
-    updatedAt: Math.max(0, toNumber(scene.updatedAt, safeNow())),
+    updatedAt: Math.max(0, toNumber(scene.updatedAt, 0)),
     layers
   };
 }
 function ensureSceneLibrary(value) {
-  const base = createEmptySceneLibrary();
   if (!value || typeof value !== "object") {
-    return base;
+    return {
+      version: 1,
+      updatedAt: 0,
+      scenes: []
+    };
   }
   return {
     version: 1,
-    updatedAt: Math.max(0, toNumber(value.updatedAt, safeNow())),
-    scenes: Array.isArray(value.scenes) ? value.scenes.map(normalizeScene).filter(Boolean) : []
+    updatedAt: Math.max(0, toNumber(value.updatedAt, 0)),
+    scenes: Array.isArray(value.scenes) ? value.scenes.map((scene, index) => normalizeScene(scene, index)).filter(Boolean) : []
   };
 }
 function isYouTubeVideoId(value) {
