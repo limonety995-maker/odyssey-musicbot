@@ -1,19 +1,19 @@
 {
   "name": "Sync Music MVP",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "manifest_version": 1,
   "author": "Codex",
-  "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.2.8",
+  "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.2.9",
   "description": "GM-controlled synchronized YouTube music layers for Owlbear Rodeo.",
   "homepage_url": "https://github.com/limonety995-maker/odyssey-musicbot",
   "action": {
     "title": "Sync Music",
-    "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.2.8",
-    "popover": "https://limonety995-maker.github.io/odyssey-musicbot/index.html?v=0.2.8",
+    "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.2.9",
+    "popover": "https://limonety995-maker.github.io/odyssey-musicbot/index.html?v=0.2.9",
     "width": 440,
     "height": 720
   },
-  "background_url": "https://limonety995-maker.github.io/odyssey-musicbot/background.html?v=0.2.8",
+  "background_url": "https://limonety995-maker.github.io/odyssey-musicbot/background.html?v=0.2.9",
   "permissions": [
     {
       "name": "autoplay",

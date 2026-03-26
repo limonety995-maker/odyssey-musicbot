@@ -5,40 +5,48 @@ import {
   LOCAL_CONTROL_CHANNEL,
   ROOM_STATE_KEY,
   SEEK_TOLERANCE_SEC,
-  SYNC_INTERVAL_MS,
   TRANSPORT_PAUSED,
   TRANSPORT_PLAYING,
   TRANSPORT_STOPPED,
   clamp,
-  computeLayerPosition,
   createClientStatus,
-  createEmptyRoomState,
-  deepClone,
-  ensureRoomState,
   getLocalOutputVolume,
   safeNow,
   setLocalOutputVolume,
 } from "./shared.js";
 import {
-  buildRoomStateApplyKey,
-  isConfirmedTrackEnd,
-  shouldRecoverPlayback,
-  shouldResetSyncLoopForRoleChange,
-  shouldSkipRedundantPlaybackApply,
-  shouldWritePeriodicSyncUpdate,
-} from "./sync-logic.js";
+  computeEffectiveTrackVolume,
+  createEmptyRoomRuntime,
+  ensureRoomRuntime,
+} from "./scene-model.js";
+import {
+  finalizeRuntimeTransitions,
+  computeSceneTimelinePosition,
+} from "./scene-runtime.js";
+import {
+  buildPlaybackSlotId,
+  computeSceneConfiguredLengthMs,
+  computeScenePlaybackGain,
+  computeTrackPlaybackGain,
+} from "./scene-playback.js";
+import { isConfirmedTrackEnd } from "./sync-logic.js";
+
+const LOCAL_RECONCILE_INTERVAL_MS = 500;
 
 const playerHost = document.getElementById("youtube-player-host");
 const statusElement = document.getElementById("background-status");
 
-let currentRoomState = createEmptyRoomState();
-let isGm = false;
-let syncIntervalHandle = null;
+let currentRuntime = createEmptyRoomRuntime();
+let currentRuntimeKey = JSON.stringify(ensureRoomRuntime(currentRuntime));
 let statusState = createClientStatus();
-let writeInFlight = false;
 let youtubeApiPromise = null;
+let reconcileIntervalHandle = null;
+let reconcileInFlight = false;
+let reconcilePending = false;
+let pendingAnnounce = false;
 let localOutputVolume = getLocalOutputVolume();
-let lastAppliedRoomStateKey = buildRoomStateApplyKey(currentRoomState);
+let lastStatusSummaryKey = "";
+let currentPlanBySlotId = new Map();
 
 const slots = new Map();
 
@@ -46,6 +54,10 @@ function updateBackgroundStatus(text) {
   if (statusElement) {
     statusElement.textContent = text;
   }
+}
+
+function normalizeRuntimeKey(runtime) {
+  return JSON.stringify(ensureRoomRuntime(runtime));
 }
 
 function loadYouTubeApi() {
@@ -107,18 +119,19 @@ async function publishClientStatus(patch = {}) {
   });
 }
 
-function clearScheduledPlay(slot) {
+function clearScheduledPlayback(slot) {
   if (slot.scheduledPlayHandle) {
     window.clearTimeout(slot.scheduledPlayHandle);
     slot.scheduledPlayHandle = 0;
   }
+  slot.scheduledActionKey = "";
 }
 
 async function getPlayerSnapshot(slot) {
   await slot.readyPromise;
   const player = slot.player;
   const videoData = typeof player.getVideoData === "function" ? player.getVideoData() : {};
-  return {
+  const snapshot = {
     currentTime: typeof player.getCurrentTime === "function"
       ? Number(player.getCurrentTime()) || 0
       : 0,
@@ -133,42 +146,36 @@ async function getPlayerSnapshot(slot) {
       ? Math.max(0, Number(player.getDuration()) || 0)
       : 0,
   };
+  if (snapshot.duration > 0) {
+    slot.durationSec = snapshot.duration;
+  }
+  return snapshot;
 }
 
-function desiredSourceKey(layer) {
-  return `${layer.sourceType}:${layer.sourceId}`;
+function desiredSourceKey(entry) {
+  return `${entry.mediaType}:${entry.sourceId}`;
 }
 
-function buildPlaybackPlanKey(layer) {
+function buildScheduledActionKey(entry, startAtMs) {
   return [
-    desiredSourceKey(layer),
-    Math.max(0, Number(layer.runtime?.cycle) || 0),
-    Math.max(0, Number(layer.runtime?.playlistIndex) || 0),
-    Math.max(0, Number(layer.runtime?.playingSince) || 0),
-    Math.round(Math.max(0, Number(layer.runtime?.pauseOffsetSec) || 0) * 1000),
+    desiredSourceKey(entry),
+    Math.round(startAtMs / 25),
+    Math.round(entry.desiredPositionSec * 1000),
+    Math.round(entry.effectiveVolume),
   ].join("|");
 }
 
-function shouldReloadLayer(slot, layer) {
-  return slot.sourceKey !== desiredSourceKey(layer)
-    || slot.lastCycle !== layer.runtime.cycle
-    || (layer.sourceType === "playlist" && slot.playlistIndex !== layer.runtime.playlistIndex);
+function shouldReloadSlot(slot, entry) {
+  return slot.sourceKey !== desiredSourceKey(entry);
 }
 
-function computeEffectiveVolume(transport, layer) {
-  return clamp(
-    (transport.masterVolume * layer.volume * localOutputVolume) / 10000,
-    0,
-    100,
-  );
-}
-
-function applyLayerVolume(slot, transport, layer) {
-  slot.player.setVolume(computeEffectiveVolume(transport, layer));
+function applyEntryVolume(slot, volume) {
+  slot.player.setVolume(clamp(Number(volume) || 0, 0, 100));
 }
 
 function isPlayingState(playerState) {
-  return playerState === window.YT?.PlayerState?.PLAYING;
+  return playerState === window.YT?.PlayerState?.PLAYING
+    || playerState === window.YT?.PlayerState?.BUFFERING;
 }
 
 function normalizeVolumeValue(value, fallback = 100) {
@@ -176,22 +183,21 @@ function normalizeVolumeValue(value, fallback = 100) {
   return clamp(Number.isFinite(numeric) ? numeric : fallback, 0, 100);
 }
 
-async function createSlot(layerId) {
+async function createSlot(slotId) {
   const host = document.createElement("div");
   host.className = "youtube-player-slot";
-  host.dataset.layerId = layerId;
+  host.dataset.slotId = slotId;
   playerHost?.append(host);
 
   const slot = {
-    layerId,
+    slotId,
     host,
     player: null,
     readyPromise: null,
     sourceKey: "",
-    playlistIndex: 0,
-    lastCycle: 0,
-    playPlanKey: "",
+    scheduledActionKey: "",
     scheduledPlayHandle: 0,
+    durationSec: 0,
   };
 
   slot.readyPromise = (async () => {
@@ -212,37 +218,35 @@ async function createSlot(layerId) {
         },
         events: {
           onReady: () => resolve(),
-          onStateChange: (event) => handlePlayerStateChange(layerId, event.data),
-          onError: (event) => handlePlayerError(layerId, event.data),
-          onAutoplayBlocked: () => handleAutoplayBlocked(layerId),
+          onStateChange: (event) => handlePlayerStateChange(slotId, event.data),
+          onError: (event) => handlePlayerError(slotId, event.data),
+          onAutoplayBlocked: () => handleAutoplayBlocked(slotId),
         },
       });
     });
   })();
 
-  slots.set(layerId, slot);
-  publishClientStatus({
+  slots.set(slotId, slot);
+  await publishClientStatus({
     slotCount: slots.size,
-    lastAction: `Created slot for ${layerId}`,
-  }).catch(() => {
-    // Ignore metadata update failures.
+    lastAction: `Created slot for ${slotId}`,
   });
   return slot;
 }
 
-async function getSlot(layerId) {
-  if (slots.has(layerId)) {
-    return slots.get(layerId);
+async function getSlot(slotId) {
+  if (slots.has(slotId)) {
+    return slots.get(slotId);
   }
-  return createSlot(layerId);
+  return createSlot(slotId);
 }
 
-async function destroySlot(layerId) {
-  const slot = slots.get(layerId);
+async function destroySlot(slotId) {
+  const slot = slots.get(slotId);
   if (!slot) {
     return;
   }
-  clearScheduledPlay(slot);
+  clearScheduledPlayback(slot);
   try {
     await slot.readyPromise;
     if (typeof slot.player?.destroy === "function") {
@@ -252,64 +256,57 @@ async function destroySlot(layerId) {
     // Ignore destroy failures.
   }
   slot.host.remove();
-  slots.delete(layerId);
-  await publishClientStatus({
-    slotCount: slots.size,
-    lastAction: `Removed slot for ${layerId}`,
-  });
+  slots.delete(slotId);
 }
 
-function markLayerPrepared(slot, layer) {
-  slot.sourceKey = desiredSourceKey(layer);
-  slot.lastCycle = layer.runtime.cycle;
-  slot.playlistIndex = layer.runtime.playlistIndex;
+function markEntryPrepared(slot, entry) {
+  slot.sourceKey = desiredSourceKey(entry);
 }
 
-function cueLayerForPlayback(slot, layer, desiredPositionSec) {
-  const player = slot.player;
-  if (layer.sourceType === "playlist") {
-    player.cuePlaylist({
+function cueEntryPlayback(slot, entry, desiredPositionSec) {
+  if (entry.mediaType === "playlist") {
+    slot.player.cuePlaylist({
       listType: "playlist",
-      list: layer.sourceId,
-      index: layer.runtime.playlistIndex,
+      list: entry.sourceId,
+      index: 0,
       startSeconds: desiredPositionSec,
     });
   } else {
-    player.cueVideoById({
-      videoId: layer.sourceId,
+    slot.player.cueVideoById({
+      videoId: entry.sourceId,
       startSeconds: desiredPositionSec,
     });
   }
-  markLayerPrepared(slot, layer);
+  markEntryPrepared(slot, entry);
 }
 
-function loadLayerForPlayback(slot, layer, desiredPositionSec) {
-  if (layer.sourceType === "playlist") {
+function loadEntryPlayback(slot, entry, desiredPositionSec) {
+  if (entry.mediaType === "playlist") {
     slot.player.loadPlaylist({
       listType: "playlist",
-      list: layer.sourceId,
-      index: layer.runtime.playlistIndex,
+      list: entry.sourceId,
+      index: 0,
       startSeconds: desiredPositionSec,
     });
   } else {
     slot.player.loadVideoById({
-      videoId: layer.sourceId,
+      videoId: entry.sourceId,
       startSeconds: desiredPositionSec,
     });
   }
-  markLayerPrepared(slot, layer);
+  markEntryPrepared(slot, entry);
 }
 
-async function ensureLayerPrepared(slot, layer, desiredPositionSec, mode = "cue") {
+async function ensureEntryPrepared(slot, entry, desiredPositionSec, mode = "cue") {
   await slot.readyPromise;
-  if (!shouldReloadLayer(slot, layer)) {
+  if (!shouldReloadSlot(slot, entry)) {
     return false;
   }
 
   if (mode === "load") {
-    loadLayerForPlayback(slot, layer, desiredPositionSec);
+    loadEntryPlayback(slot, entry, desiredPositionSec);
   } else {
-    cueLayerForPlayback(slot, layer, desiredPositionSec);
+    cueEntryPlayback(slot, entry, desiredPositionSec);
   }
   return true;
 }
@@ -321,24 +318,22 @@ async function seekIfNeeded(slot, desiredPositionSec) {
   }
 }
 
-async function startLayerPlayback(slot, layer, reason = "Playback start") {
-  const desiredPositionSec = computeLayerPosition(layer, safeNow());
-  const sourceChanged = await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
+async function startEntryPlayback(slot, entry, reason = "Playback start") {
+  const desiredPositionSec = Math.max(0, Number(entry.desiredPositionSec) || 0);
+  const sourceChanged = await ensureEntryPrepared(slot, entry, desiredPositionSec, "cue");
 
   if (!sourceChanged) {
     await seekIfNeeded(slot, desiredPositionSec);
   }
 
-  // Prefer playing an already-cued source so volume and transport changes do not look
-  // like a brand-new YouTube session unless we have to fall back.
-  applyLayerVolume(slot, currentRoomState.transport, layer);
+  applyEntryVolume(slot, entry.effectiveVolume);
   slot.player.playVideo();
   await publishClientStatus({
     autoplayBlocked: false,
-    lastAction: `${reason} for ${layer.title}`,
+    lastAction: `${reason} for ${entry.title}`,
   });
 
-  await wait(350);
+  await wait(300);
   let snapshot = await getPlayerSnapshot(slot);
   if (isPlayingState(snapshot.playerState)) {
     return;
@@ -349,10 +344,6 @@ async function startLayerPlayback(slot, layer, reason = "Playback start") {
   }
   if (!isPlayingState(snapshot.playerState)) {
     slot.player.playVideo();
-    await publishClientStatus({
-      autoplayBlocked: false,
-      lastAction: `Fallback playVideo() called for ${layer.title}`,
-    });
   }
 
   await wait(250);
@@ -361,182 +352,216 @@ async function startLayerPlayback(slot, layer, reason = "Playback start") {
     return;
   }
 
-  loadLayerForPlayback(slot, layer, desiredPositionSec);
+  loadEntryPlayback(slot, entry, desiredPositionSec);
   slot.player.playVideo();
-  await publishClientStatus({
-    autoplayBlocked: false,
-    lastAction: `Fallback source reload for ${layer.title}`,
-  });
 }
 
-async function schedulePlayback(slot, layer) {
-  const planKey = buildPlaybackPlanKey(layer);
-  if (slot.playPlanKey === planKey && slot.scheduledPlayHandle) {
+function computeResolvedTrackTiming(scene, track, scenePositionMs, durationSec = 0) {
+  const activationMs = Math.max(0, Number(track.activationScenePositionMs) || 0)
+    + Math.max(0, Number(track.startDelayMs) || 0);
+  const startOffsetSec = Math.max(0, Number(track.startOffsetSec) || 0);
+  const startOffsetMs = startOffsetSec * 1000;
+
+  if (scenePositionMs < activationMs) {
+    return {
+      ready: false,
+      ended: false,
+      desiredPositionSec: startOffsetSec,
+      nextStartDelayMs: activationMs - scenePositionMs,
+    };
+  }
+
+  let playheadMs = scenePositionMs - activationMs + startOffsetMs;
+  const durationMs = Math.max(0, Number(durationSec) || 0) * 1000;
+
+  if (durationMs > 0) {
+    if (track.loop) {
+      playheadMs %= durationMs;
+    } else if (playheadMs >= durationMs) {
+      return {
+        ready: false,
+        ended: true,
+        desiredPositionSec: durationSec,
+        nextStartDelayMs: 0,
+      };
+    }
+  }
+
+  return {
+    ready: true,
+    ended: false,
+    desiredPositionSec: Math.max(0, playheadMs / 1000),
+    nextStartDelayMs: 0,
+  };
+}
+
+function sortScenes(runtime) {
+  return runtime.activeScenes
+    .slice()
+    .sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+}
+
+function sortTracks(scene) {
+  return scene.tracks
+    .slice()
+    .sort((left, right) => left.effectiveOrder - right.effectiveOrder || left.title.localeCompare(right.title));
+}
+
+function buildRuntimePlaybackPlan(runtime, now = safeNow()) {
+  const normalizedRuntime = finalizeRuntimeTransitions(runtime, now);
+  const entries = [];
+
+  for (const scene of sortScenes(normalizedRuntime)) {
+    const durationByTrackId = {};
+    for (const track of scene.tracks) {
+      const slot = slots.get(buildPlaybackSlotId(scene.sceneId, track.trackId));
+      if (slot?.durationSec > 0) {
+        durationByTrackId[track.trackId] = slot.durationSec;
+      }
+    }
+
+    const sceneLengthMs = computeSceneConfiguredLengthMs(
+      { tracks: scene.tracks },
+      durationByTrackId,
+    );
+    const absoluteScenePositionMs = computeSceneTimelinePosition(scene, now);
+    const cycleScenePositionMs = scene.loop && sceneLengthMs > 0
+      ? absoluteScenePositionMs % sceneLengthMs
+      : absoluteScenePositionMs;
+    const sceneGain = computeScenePlaybackGain(scene, now);
+    const scenePaused = scene.status === TRANSPORT_PAUSED;
+
+    for (const track of sortTracks(scene)) {
+      const durationSec = Number(durationByTrackId[track.trackId] || 0) || 0;
+      const timing = computeResolvedTrackTiming(scene, track, cycleScenePositionMs, durationSec);
+      let desiredStatus = TRANSPORT_PLAYING;
+
+      if (track.status === TRANSPORT_STOPPED || timing.ended) {
+        desiredStatus = TRANSPORT_STOPPED;
+      } else if (scenePaused || track.status === TRANSPORT_PAUSED) {
+        desiredStatus = TRANSPORT_PAUSED;
+      } else if (!timing.ready) {
+        desiredStatus = "queued";
+      }
+
+      const baseVolume = computeEffectiveTrackVolume({
+        masterVolume: normalizedRuntime.transport.masterVolume,
+        sceneVolume: scene.sceneVolume,
+        trackVolume: track.volume,
+        localPlayerVolume: localOutputVolume,
+      });
+      const trackGain = computeTrackPlaybackGain(track, now);
+
+      entries.push({
+        slotId: buildPlaybackSlotId(scene.sceneId, track.trackId),
+        sceneId: scene.sceneId,
+        trackId: track.trackId,
+        title: track.title,
+        sourceType: track.sourceType,
+        mediaType: track.mediaType || "video",
+        sourceId: track.sourceId,
+        desiredStatus,
+        desiredPositionSec: timing.desiredPositionSec,
+        nextStartDelayMs: timing.nextStartDelayMs,
+        effectiveVolume: clamp(baseVolume * sceneGain * trackGain, 0, 100),
+      });
+    }
+  }
+
+  return {
+    runtime: normalizedRuntime,
+    entries,
+  };
+}
+
+async function scheduleEntryPlayback(slot, entry) {
+  const startAtMs = safeNow() + Math.max(0, Number(entry.nextStartDelayMs) || 0);
+  const actionKey = buildScheduledActionKey(entry, startAtMs);
+  if (slot.scheduledActionKey === actionKey && slot.scheduledPlayHandle) {
     return;
   }
 
-  const startAt = layer.runtime.playingSince || safeNow();
-  const desiredPositionSec = computeLayerPosition(layer, startAt);
-  await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
+  clearScheduledPlayback(slot);
+  slot.scheduledActionKey = actionKey;
+  const delay = Math.max(0, startAtMs - safeNow());
 
-  clearScheduledPlay(slot);
-  slot.playPlanKey = planKey;
-  const now = safeNow();
-  const delay = Math.max(0, startAt - now);
-  await publishClientStatus({
-    lastAction: `Scheduled play for ${layer.title} in ${delay}ms`,
-  });
   if (delay <= 75) {
-    await startLayerPlayback(slot, layer, "Immediate play");
+    await startEntryPlayback(slot, entry, "Immediate play");
     return;
   }
+
   slot.scheduledPlayHandle = window.setTimeout(async () => {
     slot.scheduledPlayHandle = 0;
+    slot.scheduledActionKey = "";
     try {
-      await startLayerPlayback(slot, layer, "Scheduled play");
+      await startEntryPlayback(slot, entry, "Scheduled play");
     } catch {
-      // Ignore playback errors here. The player error handler will surface them.
+      // Ignore playback errors here; the player error handler will surface them.
     }
   }, delay);
 }
 
-function pickPrimeLayer(roomState) {
-  if (!Array.isArray(roomState.layers) || !roomState.layers.length) {
-    return null;
-  }
-  return roomState.layers.find((layer) => layer.runtime.status === TRANSPORT_PLAYING)
-    || roomState.layers[0];
-}
-
-async function primeLocalAudio(roomStateOverride = null) {
-  const primeState = ensureRoomState(roomStateOverride || currentRoomState);
-  const layer = pickPrimeLayer(primeState);
-  if (!layer) {
-    await publishClientStatus({
-      lastAction: "Prime requested, but there are no queued layers",
-    });
-    return;
-  }
-
-  const slot = await getSlot(layer.id);
-  const desiredPositionSec = computeLayerPosition(layer, safeNow());
-  await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
-
-  try {
-    slot.player.setVolume(0);
-    slot.player.playVideo();
-    await wait(250);
-    slot.player.pauseVideo();
-    slot.player.seekTo(desiredPositionSec, true);
-    applyLayerVolume(slot, primeState.transport, layer);
-    await publishClientStatus({
-      audioPrimed: true,
-      autoplayBlocked: false,
-      slotCount: slots.size,
-      lastAction: `Primed audio with ${layer.title}`,
-    });
-  } catch {
-    // Errors are surfaced via YouTube callbacks.
-  }
-}
-
-async function applyLayerState(layer, transport) {
-  const slot = await getSlot(layer.id);
+async function applyEntryState(entry) {
+  const slot = await getSlot(entry.slotId);
   await slot.readyPromise;
+  applyEntryVolume(slot, entry.effectiveVolume);
 
-  const desiredPositionSec = computeLayerPosition(layer, safeNow());
-  applyLayerVolume(slot, transport, layer);
-
-  if (transport.status === TRANSPORT_STOPPED || layer.runtime.status === TRANSPORT_STOPPED) {
-    clearScheduledPlay(slot);
-    slot.playPlanKey = "";
-    await ensureLayerPrepared(slot, layer, layer.startSeconds, "cue");
+  if (entry.desiredStatus === TRANSPORT_STOPPED) {
+    clearScheduledPlayback(slot);
+    await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
     slot.player.pauseVideo();
     try {
-      await seekIfNeeded(slot, layer.startSeconds);
+      await seekIfNeeded(slot, entry.desiredPositionSec);
     } catch {
-      // Ignore seek failures while stopped.
+      // Ignore seek failures while stopping a slot.
     }
     return;
   }
 
-  if (transport.status === TRANSPORT_PAUSED || layer.runtime.status === TRANSPORT_PAUSED) {
-    clearScheduledPlay(slot);
-    slot.playPlanKey = "";
-    await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
-    await seekIfNeeded(slot, desiredPositionSec);
+  if (entry.desiredStatus === "queued") {
+    await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
+    slot.player.pauseVideo();
+    try {
+      await seekIfNeeded(slot, entry.desiredPositionSec);
+    } catch {
+      // Ignore seek failures while queueing a slot.
+    }
+    if (entry.nextStartDelayMs > 0) {
+      await scheduleEntryPlayback(slot, entry);
+    } else {
+      clearScheduledPlayback(slot);
+    }
+    return;
+  }
+
+  if (entry.desiredStatus === TRANSPORT_PAUSED) {
+    clearScheduledPlayback(slot);
+    await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
+    await seekIfNeeded(slot, entry.desiredPositionSec);
     slot.player.pauseVideo();
     return;
   }
 
-  const planKey = buildPlaybackPlanKey(layer);
-  const startAt = layer.runtime.playingSince || safeNow();
-  const delay = Math.max(0, startAt - safeNow());
-  if (delay > 75) {
-    await schedulePlayback(slot, layer);
+  if (entry.nextStartDelayMs > 75) {
+    await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
+    await scheduleEntryPlayback(slot, entry);
     return;
   }
 
-  clearScheduledPlay(slot);
-  const hadSamePlan = slot.playPlanKey === planKey;
-  const sourceChanged = await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
-  const snapshot = await getPlayerSnapshot(slot);
-  slot.playPlanKey = planKey;
-  if (shouldSkipRedundantPlaybackApply(
-    {
-      hadSamePlan,
-      sourceChanged,
-      playerState: snapshot.playerState,
-    },
-    window.YT?.PlayerState || {},
-  )) {
-    return;
-  }
-  if (shouldRecoverPlayback(
-    {
-      sourceChanged,
-      playerState: snapshot.playerState,
-    },
-    window.YT?.PlayerState || {},
-  )) {
-    await startLayerPlayback(slot, layer, sourceChanged ? "Prepared play" : "Recovered play");
-    return;
-  }
-
-  await seekIfNeeded(slot, desiredPositionSec);
+  clearScheduledPlayback(slot);
+  await startEntryPlayback(slot, entry, "Runtime play");
 }
 
-async function applyLocalVolumeToActiveSlots() {
-  for (const layer of currentRoomState.layers) {
-    const slot = slots.get(layer.id);
-    if (!slot) {
-      continue;
-    }
-    await slot.readyPromise;
-    applyLayerVolume(slot, currentRoomState.transport, layer);
-  }
-}
-
-async function applyRoomState(roomState) {
-  const normalizedRoomState = ensureRoomState(roomState);
-  const nextRoomStateKey = buildRoomStateApplyKey(normalizedRoomState);
-  currentRoomState = normalizedRoomState;
-  if (lastAppliedRoomStateKey === nextRoomStateKey) {
+async function publishRuntimeSummary(runtime, entries, forceLastAction = null) {
+  const summaryKey = JSON.stringify({
+    transportStatus: runtime.transport.status,
+    slotCount: slots.size,
+    activeTitles: entries.map((entry) => entry.title),
+  });
+  if (!forceLastAction && summaryKey === lastStatusSummaryKey) {
     return;
   }
-  lastAppliedRoomStateKey = nextRoomStateKey;
-  const activeLayerIds = new Set(currentRoomState.layers.map((layer) => layer.id));
-
-  for (const slotId of Array.from(slots.keys())) {
-    if (!activeLayerIds.has(slotId)) {
-      await destroySlot(slotId);
-    }
-  }
-
-  for (const layer of currentRoomState.layers) {
-    await applyLayerState(layer, currentRoomState.transport);
-  }
-
+  lastStatusSummaryKey = summaryKey;
   await publishClientStatus({
     engineReady: true,
     backgroundConnected: true,
@@ -544,146 +569,181 @@ async function applyRoomState(roomState) {
     audioPrimed: statusState.audioPrimed,
     autoplayBlocked: statusState.autoplayBlocked,
     errors: statusState.errors,
-    transportStatus: currentRoomState.transport.status,
+    transportStatus: runtime.transport.status,
     slotCount: slots.size,
-    lastAction: `Applied room state revision ${currentRoomState.revision}`,
-    activeLayerTitles: currentRoomState.layers.map((layer) => layer.title),
+    lastAction: forceLastAction || statusState.lastAction,
+    activeLayerTitles: entries.map((entry) => entry.title),
   });
+}
+
+async function performReconcile(announce = false) {
+  const { runtime, entries } = buildRuntimePlaybackPlan(currentRuntime, safeNow());
+  currentPlanBySlotId = new Map(entries.map((entry) => [entry.slotId, entry]));
+
+  const activeSlotIds = new Set(entries.map((entry) => entry.slotId));
+  for (const slotId of Array.from(slots.keys())) {
+    if (!activeSlotIds.has(slotId)) {
+      await destroySlot(slotId);
+    }
+  }
+
+  for (const entry of entries) {
+    await applyEntryState(entry);
+  }
+
+  await publishRuntimeSummary(
+    runtime,
+    entries,
+    announce
+      ? `Applied runtime update (${entries.length} active slot${entries.length === 1 ? "" : "s"})`
+      : null,
+  );
 
   updateBackgroundStatus(
-    currentRoomState.layers.length
-      ? `Audio engine ready: ${currentRoomState.transport.status} (${currentRoomState.layers.length} active layer${currentRoomState.layers.length === 1 ? "" : "s"})`
-      : "Audio engine ready: no active layers",
+    entries.length
+      ? `Audio engine ready: ${runtime.transport.status} (${entries.length} active slot${entries.length === 1 ? "" : "s"})`
+      : "Audio engine ready: no active slots",
   );
 }
 
-async function writeRoomState(nextState, shouldBroadcast = true) {
-  const normalized = ensureRoomState(nextState);
-  normalized.revision = currentRoomState.revision + 1;
-  lastAppliedRoomStateKey = buildRoomStateApplyKey(normalized);
-  currentRoomState = normalized;
-  await OBR.room.setMetadata({
-    [ROOM_STATE_KEY]: normalized,
-  });
-  if (shouldBroadcast) {
-    await OBR.broadcast.sendMessage(
-      BROADCAST_CHANNEL,
-      { roomState: normalized },
-      { destination: "ALL" },
-    );
+async function reconcilePlayback(announce = false) {
+  pendingAnnounce = pendingAnnounce || announce;
+  if (reconcileInFlight) {
+    reconcilePending = true;
+    return;
+  }
+
+  reconcileInFlight = true;
+  try {
+    do {
+      const runAnnounce = pendingAnnounce;
+      reconcilePending = false;
+      pendingAnnounce = false;
+      await performReconcile(runAnnounce);
+    } while (reconcilePending);
+  } finally {
+    reconcileInFlight = false;
   }
 }
 
-async function handlePlayerStateChange(layerId, playerState) {
-  if (!isGm) {
+async function applyRuntime(runtime) {
+  const normalizedRuntime = ensureRoomRuntime(runtime);
+  const nextKey = normalizeRuntimeKey(normalizedRuntime);
+  currentRuntime = normalizedRuntime;
+  if (nextKey === currentRuntimeKey) {
+    await reconcilePlayback(false);
     return;
   }
-  const layer = currentRoomState.layers.find((entry) => entry.id === layerId);
-  if (!layer) {
+  currentRuntimeKey = nextKey;
+  await reconcilePlayback(true);
+}
+
+function pickPrimeEntry(runtimeOverride = null) {
+  const { entries } = buildRuntimePlaybackPlan(runtimeOverride || currentRuntime, safeNow());
+  return entries.find((entry) => entry.desiredStatus === TRANSPORT_PLAYING)
+    || entries.find((entry) => entry.desiredStatus === "queued")
+    || entries[0]
+    || null;
+}
+
+async function primeLocalAudio(runtimeOverride = null) {
+  const entry = pickPrimeEntry(runtimeOverride);
+  if (!entry) {
+    await publishClientStatus({
+      lastAction: "Prime requested, but there are no queued tracks",
+    });
     return;
   }
 
-  if (layer.sourceType === "playlist") {
-    return;
-  }
+  const slot = await getSlot(entry.slotId);
+  await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
 
+  try {
+    slot.player.setVolume(0);
+    slot.player.playVideo();
+    await wait(250);
+    slot.player.pauseVideo();
+    slot.player.seekTo(entry.desiredPositionSec, true);
+    applyEntryVolume(slot, entry.effectiveVolume);
+    await publishClientStatus({
+      audioPrimed: true,
+      autoplayBlocked: false,
+      slotCount: slots.size,
+      lastAction: `Primed audio with ${entry.title}`,
+    });
+  } catch {
+    // Errors are surfaced via YouTube callbacks.
+  }
+}
+
+async function handlePlayerStateChange(slotId, playerState) {
   if (window.YT?.PlayerState?.ENDED !== playerState) {
     return;
   }
 
-  const slot = slots.get(layerId);
-  if (slot) {
-    const snapshot = await getPlayerSnapshot(slot);
-    if (!isConfirmedTrackEnd(snapshot)) {
-      await startLayerPlayback(slot, layer, "Recovered from false ENDED");
-      return;
-    }
-  }
-
-  if (writeInFlight) {
+  const slot = slots.get(slotId);
+  if (!slot) {
     return;
   }
-  writeInFlight = true;
 
-  try {
-    const next = deepClone(currentRoomState);
-    const nextLayer = next.layers.find((entry) => entry.id === layerId);
-    if (!nextLayer) {
-      return;
+  const snapshot = await getPlayerSnapshot(slot);
+  if (!isConfirmedTrackEnd(snapshot)) {
+    const entry = currentPlanBySlotId.get(slotId);
+    if (entry?.desiredStatus === TRANSPORT_PLAYING) {
+      await startEntryPlayback(slot, entry, "Recovered from false ENDED");
     }
+    return;
+  }
 
-    if (nextLayer.loop) {
-      const now = safeNow();
-      next.transport.status = TRANSPORT_PLAYING;
-      next.transport.changedAt = now + 1500;
-      nextLayer.runtime.status = TRANSPORT_PLAYING;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-      nextLayer.runtime.playingSince = now + 1500;
-      nextLayer.runtime.cycle += 1;
-      nextLayer.runtime.playlistIndex = 0;
-      nextLayer.runtime.playlistVideoId = null;
-      nextLayer.runtime.lastSyncAt = now;
-      await writeRoomState(next);
-      return;
-    }
+  const entry = currentPlanBySlotId.get(slotId);
+  if (!entry) {
+    return;
+  }
 
-    nextLayer.runtime.status = TRANSPORT_STOPPED;
-    nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-    nextLayer.runtime.playingSince = null;
-    nextLayer.runtime.playlistIndex = 0;
-    nextLayer.runtime.playlistVideoId = null;
-    nextLayer.runtime.lastSyncAt = safeNow();
-    if (next.layers.every((entry) => entry.runtime.status === TRANSPORT_STOPPED)) {
-      next.transport.status = TRANSPORT_STOPPED;
-      next.transport.changedAt = safeNow();
-    }
-    await writeRoomState(next);
-  } finally {
-    writeInFlight = false;
+  await reconcilePlayback(false);
+  const nextEntry = currentPlanBySlotId.get(slotId);
+  if (nextEntry?.desiredStatus === TRANSPORT_PLAYING) {
+    await startEntryPlayback(slot, nextEntry, "Loop recovery");
   }
 }
 
-async function handlePlayerError(layerId, code) {
+async function handlePlayerError(slotId, code) {
   const message = code === 101 || code === 150
-    ? `Layer ${layerId} cannot be embedded by YouTube (error ${code}).`
-    : `Layer ${layerId} failed with YouTube error ${code}.`;
+    ? `Layer ${slotId} cannot be embedded by YouTube (error ${code}).`
+    : `Layer ${slotId} failed with YouTube error ${code}.`;
 
   const nextErrors = [...(statusState.errors || []), message].slice(-8);
   await publishClientStatus({
     ...statusState,
     errors: nextErrors,
-    lastAction: `YouTube error ${code} for ${layerId}`,
+    lastAction: `YouTube error ${code} for ${slotId}`,
   });
   notifyLocal(message, "WARNING");
 }
 
-async function handleAutoplayBlocked(layerId) {
-  const message = `Autoplay was blocked for layer ${layerId}. Open the extension panel and retry audio on this browser.`;
+async function handleAutoplayBlocked(slotId) {
+  const message = `Autoplay was blocked for layer ${slotId}. Open the extension panel and retry audio on this browser.`;
   await publishClientStatus({
     ...statusState,
     audioPrimed: false,
     autoplayBlocked: true,
     errors: [...(statusState.errors || []), message].slice(-8),
-    lastAction: `Autoplay blocked for ${layerId}`,
+    lastAction: `Autoplay blocked for ${slotId}`,
   });
   notifyLocal(message, "WARNING");
 }
 
 async function retryLocalAudio() {
-  const transport = currentRoomState.transport;
-  if (transport.status !== TRANSPORT_PLAYING) {
-    return;
-  }
-  for (const layer of currentRoomState.layers) {
-    if (layer.runtime.status !== TRANSPORT_PLAYING) {
-      continue;
-    }
-    const slot = slots.get(layer.id);
+  const activeEntries = Array.from(currentPlanBySlotId.values()).filter(
+    (entry) => entry.desiredStatus === TRANSPORT_PLAYING,
+  );
+  for (const entry of activeEntries) {
+    const slot = slots.get(entry.slotId);
     if (!slot) {
       continue;
     }
-    clearScheduledPlay(slot);
-    await startLayerPlayback(slot, layer, "Manual retry");
+    clearScheduledPlayback(slot);
+    await startEntryPlayback(slot, entry, "Manual retry");
   }
   await publishClientStatus({
     ...statusState,
@@ -693,90 +753,23 @@ async function retryLocalAudio() {
   });
 }
 
-async function gmPeriodicSync() {
-  if (!isGm || currentRoomState.transport.status !== TRANSPORT_PLAYING || writeInFlight) {
-    return;
-  }
-
-  writeInFlight = true;
-  try {
-    const next = deepClone(currentRoomState);
-    const now = safeNow();
-    let changed = false;
-
-    for (const layer of next.layers) {
-      if (layer.runtime.status !== TRANSPORT_PLAYING) {
-        continue;
-      }
-      const slot = slots.get(layer.id);
-      if (!slot) {
-        continue;
-      }
-      const snapshot = await getPlayerSnapshot(slot);
-      if (window.YT?.PlayerState?.ENDED === snapshot.playerState) {
-        if (!isConfirmedTrackEnd(snapshot)) {
-          await startLayerPlayback(slot, layer, "Recovered from false ENDED");
-          continue;
-        }
-        if (layer.loop) {
-          layer.runtime.pauseOffsetSec = layer.startSeconds;
-          layer.runtime.playingSince = now + 1500;
-          layer.runtime.cycle += 1;
-          layer.runtime.playlistIndex = 0;
-          layer.runtime.playlistVideoId = null;
-          layer.runtime.lastSyncAt = now;
-        } else {
-          layer.runtime.status = TRANSPORT_STOPPED;
-          layer.runtime.pauseOffsetSec = layer.startSeconds;
-          layer.runtime.playingSince = null;
-          layer.runtime.playlistIndex = 0;
-          layer.runtime.playlistVideoId = null;
-          layer.runtime.lastSyncAt = now;
-        }
-        changed = true;
-        continue;
-      }
-      if (shouldWritePeriodicSyncUpdate(layer, snapshot)) {
-        layer.runtime.pauseOffsetSec = snapshot.currentTime;
-        layer.runtime.playingSince = now;
-        if (layer.sourceType === "playlist") {
-          layer.runtime.playlistIndex = snapshot.playlistIndex;
-          layer.runtime.playlistVideoId = snapshot.videoId;
-        }
-        layer.runtime.lastSyncAt = now;
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      if (next.layers.every((entry) => entry.runtime.status === TRANSPORT_STOPPED)) {
-        next.transport.status = TRANSPORT_STOPPED;
-      }
-      next.transport.changedAt = now;
-      await writeRoomState(next);
-    }
-  } finally {
-    writeInFlight = false;
-  }
+async function applyLocalVolumeToActiveSlots() {
+  await reconcilePlayback(false);
 }
 
-function resetSyncLoop() {
-  if (syncIntervalHandle) {
-    window.clearInterval(syncIntervalHandle);
-    syncIntervalHandle = null;
+function resetReconcileLoop() {
+  if (reconcileIntervalHandle) {
+    window.clearInterval(reconcileIntervalHandle);
+    reconcileIntervalHandle = null;
   }
-  if (!isGm) {
-    return;
-  }
-  syncIntervalHandle = window.setInterval(() => {
-    gmPeriodicSync().catch(() => {
-      // Ignore sync loop failures so the interval can continue.
+  reconcileIntervalHandle = window.setInterval(() => {
+    reconcilePlayback(false).catch(() => {
+      // Ignore local reconcile failures so the interval can continue.
     });
-  }, SYNC_INTERVAL_MS);
+  }, LOCAL_RECONCILE_INTERVAL_MS);
 }
 
 OBR.onReady(async () => {
-  isGm = (await OBR.player.getRole()) === "GM";
   await publishClientStatus({
     engineReady: true,
     backgroundConnected: true,
@@ -785,13 +778,14 @@ OBR.onReady(async () => {
     slotCount: slots.size,
     lastAction: "Background engine initialized",
   });
+
   const metadata = await OBR.room.getMetadata();
-  await applyRoomState(metadata[ROOM_STATE_KEY]);
-  resetSyncLoop();
+  await applyRuntime(metadata[ROOM_STATE_KEY]);
+  resetReconcileLoop();
 
   OBR.room.onMetadataChange((nextMetadata) => {
-    applyRoomState(nextMetadata[ROOM_STATE_KEY]).catch(() => {
-      // Ignore transient room-state errors.
+    applyRuntime(nextMetadata[ROOM_STATE_KEY]).catch(() => {
+      // Ignore transient room-runtime errors.
     });
   });
 
@@ -799,7 +793,7 @@ OBR.onReady(async () => {
     if (!event.data?.roomState) {
       return;
     }
-    applyRoomState(event.data.roomState).catch(() => {
+    applyRuntime(event.data.roomState).catch(() => {
       // Ignore transient broadcast errors.
     });
   });
@@ -812,25 +806,19 @@ OBR.onReady(async () => {
       return;
     }
     if (event.data?.type === "prime-local-audio") {
-      primeLocalAudio(event.data?.roomState).catch(() => {
-        // Ignore local prime failures.
-      });
+      applyRuntime(event.data?.roomRuntime || event.data?.roomState || currentRuntime)
+        .then(() => primeLocalAudio(event.data?.roomRuntime || event.data?.roomState || currentRuntime))
+        .catch(() => {
+          // Ignore local prime failures.
+        });
       return;
     }
     if (event.data?.type === "set-local-volume") {
       localOutputVolume = normalizeVolumeValue(event.data?.volume);
       setLocalOutputVolume(localOutputVolume);
-      applyLocalVolumeToActiveSlots()
-        .catch(() => {
-          // Ignore local volume update failures.
-        });
-    }
-  });
-
-  OBR.player.onChange((player) => {
-    if (shouldResetSyncLoopForRoleChange(isGm, player.role)) {
-      isGm = player.role === "GM";
-      resetSyncLoop();
+      applyLocalVolumeToActiveSlots().catch(() => {
+        // Ignore local volume update failures.
+      });
     }
   });
 });

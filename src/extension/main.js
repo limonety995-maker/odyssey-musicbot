@@ -2,37 +2,63 @@ import OBR from "@owlbear-rodeo/sdk";
 import {
   BROADCAST_CHANNEL,
   CLIENT_STATUS_KEY,
+  EXTENSION_ID,
   LOCAL_CONTROL_CHANNEL,
   ROOM_STATE_KEY,
   SCENE_LIBRARY_KEY,
-  START_LEAD_MS,
   TRANSPORT_PAUSED,
   TRANSPORT_PLAYING,
   TRANSPORT_STOPPED,
   clamp,
-  computeLayerPosition,
-  createEmptyRoomState,
-  createEmptySceneLibrary,
-  createLayer,
-  deepClone,
-  ensureRoomState,
-  ensureSceneLibrary,
   formatSourceType,
   getLocalOutputVolume,
-  makeId,
   parseSupportedTrackUrl,
   safeNow,
   setLocalOutputVolume,
-  stripLayerForScene,
   summarizeTransport,
 } from "./shared.js";
+import {
+  createEmptyLibraryPack,
+  createEmptyRoomRuntime,
+  ensureLibraryPack,
+  ensureRoomRuntime,
+} from "./scene-model.js";
+import {
+  addTrackToScene,
+  deleteSceneFromLibrary,
+  launchScene,
+  pauseAllScenes,
+  removeTrackFromScene,
+  resumeAllScenes,
+  setMasterVolume,
+  stopAllScenes,
+  updateTrackSettings,
+} from "./scene-runtime.js";
+import {
+  LIVE_SCENE_ID,
+  LIVE_SCENE_NAME,
+  buildLegacyLibraryView,
+  buildLegacyRoomStateView,
+  collectCurrentMixTracks,
+  createSceneTrackFromParsedTrack,
+  ensureLiveSceneInLibrary,
+  findTrackReference,
+  getLiveScene,
+  upsertLibraryScene,
+} from "./scene-compat.js";
 
 const root = document.getElementById("app");
+const LIBRARY_STORAGE_KEY = `${EXTENSION_ID}/library-pack`;
+
+const initialLibraryPack = ensureLiveSceneInLibrary(createEmptyLibraryPack(0), 0);
+const initialRuntime = createEmptyRoomRuntime(0);
 
 const state = {
   role: "PLAYER",
-  roomState: createEmptyRoomState(),
-  library: createEmptySceneLibrary(),
+  runtime: initialRuntime,
+  libraryPack: initialLibraryPack,
+  roomState: buildLegacyRoomStateView(initialRuntime, initialLibraryPack),
+  library: buildLegacyLibraryView(initialLibraryPack),
   loading: true,
   busy: false,
   draft: {
@@ -95,10 +121,49 @@ function setNotices(messages = []) {
   state.notices = Array.isArray(messages) ? messages.filter(Boolean).slice(0, 4) : [];
 }
 
+function syncDerivedState() {
+  state.roomState = buildLegacyRoomStateView(state.runtime, state.libraryPack);
+  state.library = buildLegacyLibraryView(state.libraryPack);
+}
+
+function loadStoredLibraryPack(roomLibraryMetadata = null) {
+  try {
+    const raw = localStorage.getItem(LIBRARY_STORAGE_KEY);
+    if (raw) {
+      return ensureLiveSceneInLibrary(JSON.parse(raw));
+    }
+  } catch {
+    // Ignore localStorage parse failures and fall back to migration/defaults.
+  }
+
+  const migrated = ensureLibraryPack(roomLibraryMetadata);
+  if (migrated.scenes.length) {
+    const nextLibrary = ensureLiveSceneInLibrary(migrated);
+    try {
+      localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(nextLibrary));
+    } catch {
+      // Ignore localStorage write failures.
+    }
+    return nextLibrary;
+  }
+
+  return ensureLiveSceneInLibrary(createEmptyLibraryPack());
+}
+
+function persistLibraryPack(nextLibrary) {
+  state.libraryPack = ensureLiveSceneInLibrary(nextLibrary);
+  try {
+    localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(state.libraryPack));
+  } catch {
+    // Ignore localStorage write failures.
+  }
+}
+
 async function refreshRoomData() {
   const metadata = await OBR.room.getMetadata();
-  state.roomState = ensureRoomState(metadata[ROOM_STATE_KEY]);
-  state.library = ensureSceneLibrary(metadata[SCENE_LIBRARY_KEY]);
+  state.runtime = ensureRoomRuntime(metadata[ROOM_STATE_KEY]);
+  state.libraryPack = loadStoredLibraryPack(metadata[SCENE_LIBRARY_KEY]);
+  syncDerivedState();
 }
 
 async function refreshLocalClientStatus() {
@@ -115,6 +180,40 @@ async function refreshLocalClientStatus() {
   }
 }
 
+async function pushRuntime(nextRuntime) {
+  const normalized = ensureRoomRuntime(nextRuntime);
+  await OBR.room.setMetadata({
+    [ROOM_STATE_KEY]: normalized,
+  });
+  await OBR.broadcast.sendMessage(
+    BROADCAST_CHANNEL,
+    { roomState: normalized },
+    { destination: "ALL" },
+  );
+  state.runtime = normalized;
+  syncDerivedState();
+}
+
+async function mutateRuntime(mutator) {
+  const metadata = await OBR.room.getMetadata();
+  const current = ensureRoomRuntime(metadata[ROOM_STATE_KEY]);
+  const nextRuntime = mutator(current);
+  if (!nextRuntime) {
+    return;
+  }
+  await pushRuntime(nextRuntime);
+}
+
+function mutateLibrary(mutator) {
+  const nextLibrary = mutator(ensureLiveSceneInLibrary(state.libraryPack));
+  if (!nextLibrary) {
+    return false;
+  }
+  persistLibraryPack(nextLibrary);
+  syncDerivedState();
+  return true;
+}
+
 function syncLocalStatusFromPlayer(player) {
   const nextStatus = player?.metadata?.[CLIENT_STATUS_KEY];
   if (nextStatus) {
@@ -127,128 +226,43 @@ function syncLocalStatusFromPlayer(player) {
   }
 }
 
-async function pushRoomState(nextState) {
-  const normalized = ensureRoomState(nextState);
-  await OBR.room.setMetadata({
-    [ROOM_STATE_KEY]: normalized,
-  });
-  await OBR.broadcast.sendMessage(
-    BROADCAST_CHANNEL,
-    { roomState: normalized },
-    { destination: "ALL" },
-  );
-  state.roomState = normalized;
-}
-
-async function mutateRoomState(mutator) {
-  const metadata = await OBR.room.getMetadata();
-  const current = ensureRoomState(metadata[ROOM_STATE_KEY]);
-  const draft = deepClone(current);
-  const changed = mutator(draft, current);
-  if (changed === false) {
-    return;
-  }
-  draft.revision = current.revision + 1;
-  await pushRoomState(draft);
-}
-
-async function pushSceneLibrary(nextLibrary) {
-  const normalized = ensureSceneLibrary(nextLibrary);
-  await OBR.room.setMetadata({
-    [SCENE_LIBRARY_KEY]: normalized,
-  });
-  state.library = normalized;
-}
-
-async function mutateSceneLibrary(mutator) {
-  const metadata = await OBR.room.getMetadata();
-  const current = ensureSceneLibrary(metadata[SCENE_LIBRARY_KEY]);
-  const draft = deepClone(current);
-  const changed = mutator(draft, current);
-  if (changed === false) {
-    return;
-  }
-  draft.updatedAt = safeNow();
-  await pushSceneLibrary(draft);
-}
-
-function buildPlayStateFromCurrent(currentState) {
-  const now = safeNow();
-  const startAt = now + START_LEAD_MS;
-  const next = deepClone(currentState);
-  next.transport.status = TRANSPORT_PLAYING;
-  next.transport.changedAt = startAt;
-  for (const layer of next.layers) {
-    const currentPosition = currentState.transport.status === TRANSPORT_PLAYING
-      ? computeLayerPosition(layer, now)
-      : layer.runtime.status === TRANSPORT_STOPPED
-        ? layer.startSeconds
-        : layer.runtime.pauseOffsetSec;
-    layer.runtime.status = TRANSPORT_PLAYING;
-    layer.runtime.pauseOffsetSec = currentPosition;
-    layer.runtime.playingSince = startAt;
-    layer.runtime.lastSyncAt = now;
-  }
-  return next;
-}
-
-function buildPauseStateFromCurrent(currentState) {
-  const now = safeNow();
-  const next = deepClone(currentState);
-  next.transport.status = TRANSPORT_PAUSED;
-  next.transport.changedAt = now;
-  for (const layer of next.layers) {
-    layer.runtime.pauseOffsetSec = computeLayerPosition(layer, now);
-    layer.runtime.status = TRANSPORT_PAUSED;
-    layer.runtime.playingSince = null;
-    layer.runtime.lastSyncAt = now;
-  }
-  return next;
-}
-
-function buildStopStateFromCurrent(currentState) {
-  const now = safeNow();
-  const next = deepClone(currentState);
-  next.transport.status = TRANSPORT_STOPPED;
-  next.transport.changedAt = now;
-  for (const layer of next.layers) {
-    layer.runtime.status = TRANSPORT_STOPPED;
-    layer.runtime.pauseOffsetSec = layer.startSeconds;
-    layer.runtime.playingSince = null;
-    layer.runtime.playlistIndex = 0;
-    layer.runtime.playlistVideoId = null;
-    layer.runtime.lastSyncAt = now;
-  }
-  return next;
-}
-
 async function addResolvedTrack(track) {
-  await mutateRoomState((draft, current) => {
-    const nextLayer = createLayer(track);
-    const now = safeNow();
-    if (current.transport.status === TRANSPORT_PLAYING) {
-      nextLayer.runtime.status = TRANSPORT_PLAYING;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-      nextLayer.runtime.playingSince = now + START_LEAD_MS;
-    } else if (current.transport.status === TRANSPORT_PAUSED) {
-      nextLayer.runtime.status = TRANSPORT_PAUSED;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-    } else {
-      nextLayer.runtime.status = TRANSPORT_STOPPED;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-    }
-    nextLayer.runtime.lastSyncAt = now;
-    draft.layers.push(nextLayer);
-    if (!draft.activeScene) {
-      draft.activeScene = {
-        id: "live-mix",
-        name: "Live mix",
-      };
-    }
-    draft.transport.changedAt = current.transport.status === TRANSPORT_PLAYING
-      ? now + START_LEAD_MS
-      : now;
+  let nextLibrary = state.libraryPack;
+  if (!getLiveScene(nextLibrary)) {
+    nextLibrary = ensureLiveSceneInLibrary(nextLibrary);
+  }
+
+  const nextTrack = createSceneTrackFromParsedTrack(track);
+  if (!nextTrack) {
+    throw new Error("Could not turn this link into a playable scene track.");
+  }
+
+  const liveScene = getLiveScene(nextLibrary);
+  const currentTracks = liveScene?.tracks || [];
+  const updatedLiveScene = upsertLibraryScene({
+    library: nextLibrary,
+    sceneId: LIVE_SCENE_ID,
+    name: LIVE_SCENE_NAME,
+    tracks: [...currentTracks, nextTrack],
+    now: safeNow(),
   });
+  persistLibraryPack(updatedLiveScene);
+
+  const activeLiveScene = state.runtime.activeScenes.find((scene) => scene.sceneId === LIVE_SCENE_ID);
+  if (activeLiveScene) {
+    const result = addTrackToScene({
+      library: state.libraryPack,
+      runtime: state.runtime,
+      sceneId: LIVE_SCENE_ID,
+      track: nextTrack,
+      now: safeNow(),
+    });
+    persistLibraryPack(result.library);
+    await pushRuntime(result.runtime);
+    return;
+  }
+
+  syncDerivedState();
 }
 
 async function handleAddTrack() {
@@ -284,122 +298,158 @@ async function handleAddTrack() {
 
 async function handlePlayMix() {
   await unlockLocalAudio();
-  await mutateRoomState((draft, current) => {
-    if (!draft.layers.length) {
-      return false;
+  if (state.runtime.activeScenes.length) {
+    if (state.runtime.transport.status === TRANSPORT_PLAYING) {
+      return;
     }
-    Object.assign(draft, buildPlayStateFromCurrent(current));
-  });
+    await mutateRuntime((current) => resumeAllScenes(current, safeNow()));
+    return;
+  }
+
+  const liveScene = getLiveScene(state.libraryPack);
+  if (!liveScene?.tracks?.length) {
+    setError("There are no tracks in the live mix yet.");
+    return;
+  }
+
+  await pushRuntime(launchScene({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId: LIVE_SCENE_ID,
+    mode: "replace",
+    now: safeNow(),
+  }));
 }
 
 async function handlePauseMix() {
-  await mutateRoomState((draft, current) => {
-    if (!draft.layers.length) {
-      return false;
-    }
-    Object.assign(draft, buildPauseStateFromCurrent(current));
-  });
+  if (!state.runtime.activeScenes.length || state.runtime.transport.status !== TRANSPORT_PLAYING) {
+    return;
+  }
+  await mutateRuntime((current) => pauseAllScenes(current, safeNow()));
 }
 
 async function handleStopMix() {
-  await mutateRoomState((draft, current) => {
-    if (!draft.layers.length) {
-      return false;
-    }
-    Object.assign(draft, buildStopStateFromCurrent(current));
-  });
+  if (!state.runtime.activeScenes.length || state.runtime.transport.status === TRANSPORT_STOPPED) {
+    return;
+  }
+  await mutateRuntime((current) => stopAllScenes(current, safeNow()));
 }
 
 async function handleRemoveLayer(layerId) {
-  await mutateRoomState((draft) => {
-    draft.layers = draft.layers.filter((layer) => layer.id !== layerId);
-    if (!draft.layers.length) {
-      draft.transport.status = TRANSPORT_STOPPED;
-      draft.transport.changedAt = safeNow();
-      draft.activeScene = null;
-    }
+  const trackRef = findTrackReference(state.runtime, state.libraryPack, layerId);
+  if (!trackRef) {
+    return;
+  }
+  const result = removeTrackFromScene({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId: trackRef.sceneId,
+    trackId: trackRef.trackId,
+    now: safeNow(),
   });
+  persistLibraryPack(result.library);
+  if (state.runtime.activeScenes.some((scene) => scene.sceneId === trackRef.sceneId)) {
+    await pushRuntime(result.runtime);
+    return;
+  }
+  syncDerivedState();
+  render();
 }
 
 async function handleLayerVolume(layerId, volume) {
-  await mutateRoomState((draft) => {
-    const layer = draft.layers.find((item) => item.id === layerId);
-    if (!layer) {
-      return false;
-    }
-    layer.volume = clamp(Number(volume), 0, 100);
+  const trackRef = findTrackReference(state.runtime, state.libraryPack, layerId);
+  if (!trackRef) {
+    return;
+  }
+  const result = updateTrackSettings({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId: trackRef.sceneId,
+    trackId: trackRef.trackId,
+    patch: {
+      volume: clamp(Number(volume), 0, 100),
+    },
+    now: safeNow(),
   });
+  persistLibraryPack(result.library);
+  if (state.runtime.activeScenes.some((scene) => scene.sceneId === trackRef.sceneId)) {
+    await pushRuntime(result.runtime);
+    return;
+  }
+  syncDerivedState();
+  render();
 }
 
 async function handleLayerLoop(layerId, loop) {
-  await mutateRoomState((draft) => {
-    const layer = draft.layers.find((item) => item.id === layerId);
-    if (!layer) {
-      return false;
-    }
-    layer.loop = Boolean(loop);
+  const trackRef = findTrackReference(state.runtime, state.libraryPack, layerId);
+  if (!trackRef) {
+    return;
+  }
+  const result = updateTrackSettings({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId: trackRef.sceneId,
+    trackId: trackRef.trackId,
+    patch: {
+      loop: Boolean(loop),
+    },
+    now: safeNow(),
   });
+  persistLibraryPack(result.library);
+  if (state.runtime.activeScenes.some((scene) => scene.sceneId === trackRef.sceneId)) {
+    await pushRuntime(result.runtime);
+    return;
+  }
+  syncDerivedState();
+  render();
 }
 
 async function handleMasterVolume(volume) {
-  await mutateRoomState((draft) => {
-    draft.transport.masterVolume = clamp(Number(volume), 0, 100);
-  });
+  await mutateRuntime((current) => setMasterVolume(current, clamp(Number(volume), 0, 100), safeNow()));
 }
 
 async function handlePlayScene(sceneId) {
-  const scene = state.library.scenes.find((entry) => entry.id === sceneId);
+  const scene = state.libraryPack.scenes.find((entry) => entry.id === sceneId);
   if (!scene) {
-    setError("Scene not found in this room.");
+    setError("Scene not found in this browser library.");
     return;
   }
-  await mutateRoomState((draft) => {
-    const now = safeNow();
-    const startAt = now + START_LEAD_MS;
-    draft.activeScene = { id: scene.id, name: scene.name };
-    draft.transport.status = TRANSPORT_PLAYING;
-    draft.transport.changedAt = startAt;
-    draft.layers = scene.layers.map((layer) => {
-      const nextLayer = createLayer(layer);
-      nextLayer.runtime.status = TRANSPORT_PLAYING;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-      nextLayer.runtime.playingSince = startAt;
-      nextLayer.runtime.lastSyncAt = now;
-      return nextLayer;
-    });
-  });
+  await unlockLocalAudio();
+  await pushRuntime(launchScene({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId,
+    mode: "replace",
+    now: safeNow(),
+  }));
 }
 
 async function handleSaveCurrentScene() {
   const sceneName = state.draft.sceneName.trim()
     || state.roomState.activeScene?.name
     || "New scene";
-  if (!state.roomState.layers.length) {
+  const nextTracks = collectCurrentMixTracks(state.runtime, state.libraryPack);
+  if (!nextTracks.length) {
     setError("There is no active mix to save.");
     return;
   }
   setBusy(true);
   clearError();
   try {
-    await mutateSceneLibrary((draft, current) => {
-      const existingId = current.scenes.some((entry) => entry.id === state.roomState.activeScene?.id)
-        ? state.roomState.activeScene.id
-        : makeId("scene");
-      const nextScene = {
-        id: existingId,
-        name: sceneName,
-        updatedAt: safeNow(),
-        layers: state.roomState.layers.map(stripLayerForScene),
-      };
-      const existingIndex = draft.scenes.findIndex((entry) => entry.id === existingId);
-      if (existingIndex >= 0) {
-        draft.scenes[existingIndex] = nextScene;
-      } else {
-        draft.scenes.unshift(nextScene);
-      }
-    });
+    const reusableSceneId = state.runtime.activeScenes.length === 1
+      && state.runtime.activeScenes[0].sceneId !== LIVE_SCENE_ID
+      ? state.runtime.activeScenes[0].sceneId
+      : null;
+    persistLibraryPack(upsertLibraryScene({
+      library: state.libraryPack,
+      sceneId: reusableSceneId,
+      name: sceneName,
+      tracks: nextTracks,
+      now: safeNow(),
+    }));
+    syncDerivedState();
     state.draft.sceneName = "";
-    setNotices(["Scenes are now stored inside the Owlbear room, so no local helper is required."]);
+    setNotices(["Scene saved to this browser library. File import/export will be added later on top of the same runtime logic."]);
     render();
   } catch (error) {
     setError(error instanceof Error ? error.message : "Failed to save scene.");
@@ -412,13 +462,19 @@ async function handleDeleteScene(sceneId) {
   setBusy(true);
   clearError();
   try {
-    await mutateSceneLibrary((draft) => {
-      const nextScenes = draft.scenes.filter((scene) => scene.id !== sceneId);
-      if (nextScenes.length === draft.scenes.length) {
-        return false;
-      }
-      draft.scenes = nextScenes;
+    const result = deleteSceneFromLibrary({
+      library: state.libraryPack,
+      runtime: state.runtime,
+      sceneId,
+      now: safeNow(),
     });
+    persistLibraryPack(result.library);
+    if (state.runtime.activeScenes.some((scene) => scene.sceneId === sceneId)) {
+      await pushRuntime(result.runtime);
+    } else {
+      syncDerivedState();
+      render();
+    }
   } catch (error) {
     setError(error instanceof Error ? error.message : "Failed to delete scene.");
   } finally {
@@ -439,6 +495,7 @@ async function unlockLocalAudio() {
     LOCAL_CONTROL_CHANNEL,
     {
       type: "prime-local-audio",
+      roomRuntime: state.runtime,
       roomState: state.roomState,
     },
     { destination: "LOCAL" },
@@ -596,7 +653,7 @@ function renderMixOverview() {
       <article class="panel stat-card">
         <span class="stat-label">Saved scenes</span>
         <strong>${sceneCount}</strong>
-        <span class="muted">Shared with this room</span>
+        <span class="muted">Stored on this browser</span>
       </article>
     </section>
   `;
@@ -701,7 +758,7 @@ function renderAddTrackPanel() {
       <div class="section-row">
         <div>
           <h2>Queue a new layer</h2>
-          <p class="muted">Paste a direct YouTube or YouTube Music watch link and add it straight to the live mix.</p>
+          <p class="muted">Paste a direct YouTube or YouTube Music watch link and add it straight to the local live mix.</p>
         </div>
         <button class="action-button" data-action="add-track" ${state.busy ? "disabled" : ""}>Add to mix</button>
       </div>
@@ -709,7 +766,7 @@ function renderAddTrackPanel() {
       <input id="track-url" name="draftUrl" type="url" value="${escapeHtml(state.draft.url)}" placeholder="https://www.youtube.com/watch?v=..." />
       <label class="field-label" for="track-title">Custom title</label>
       <input id="track-title" name="draftTitle" type="text" value="${escapeHtml(state.draft.title)}" placeholder="Optional scene-friendly title" />
-      <p class="muted">No helper is required now, but the link must expose a playable <code>v=</code> or <code>list=</code> ID.</p>
+      <p class="muted">No helper is required now. Use a direct YouTube or YouTube Music link with a playable ID.</p>
     </section>
   `;
 }
@@ -812,7 +869,7 @@ function renderScenesPanel() {
       <div class="section-row">
         <div>
           <h2>Scene library</h2>
-          <p class="muted">Scenes are now stored inside the Owlbear room, so any GM opening this room can use them.</p>
+          <p class="muted">Scenes are currently stored on this browser. File import/export will be wired on top of this logic later.</p>
         </div>
       </div>
       <label class="field-label" for="scene-name">Save current mix as a scene</label>
@@ -1067,8 +1124,8 @@ OBR.onReady(async () => {
   ]);
 
   OBR.room.onMetadataChange((metadata) => {
-    state.roomState = ensureRoomState(metadata[ROOM_STATE_KEY]);
-    state.library = ensureSceneLibrary(metadata[SCENE_LIBRARY_KEY]);
+    state.runtime = ensureRoomRuntime(metadata[ROOM_STATE_KEY]);
+    syncDerivedState();
     render();
   });
 
@@ -1080,7 +1137,8 @@ OBR.onReady(async () => {
 
   OBR.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {
     if (event.data?.roomState) {
-      state.roomState = ensureRoomState(event.data.roomState);
+      state.runtime = ensureRoomRuntime(event.data.roomState);
+      syncDerivedState();
       render();
     }
   });

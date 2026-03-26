@@ -3526,7 +3526,6 @@ var LOCAL_OUTPUT_VOLUME_KEY = `${EXTENSION_ID}/local-output-volume`;
 var TRANSPORT_PLAYING = "playing";
 var TRANSPORT_PAUSED = "paused";
 var TRANSPORT_STOPPED = "stopped";
-var SYNC_INTERVAL_MS = 5e3;
 var SEEK_TOLERANCE_SEC = 1.35;
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -3571,95 +3570,6 @@ function buildStableFallbackId(prefix, parts = [], fallbackIndex = 0) {
   const slug = parts.map(slugIdPart).filter(Boolean).join("-");
   return `${prefix}-${slug || "item"}-${Math.max(0, toNumber(fallbackIndex, 0))}`;
 }
-function createLayer(source = {}, fallbackIndex = 0) {
-  const startSeconds = Math.max(0, toNumber(source.startSeconds, 0));
-  const sourceType = source.sourceType === "playlist" ? "playlist" : "video";
-  return {
-    id: typeof source.id === "string" && source.id.trim() ? source.id.trim() : buildStableFallbackId(
-      "layer",
-      [source.origin, sourceType, source.sourceId, source.title, startSeconds],
-      fallbackIndex
-    ),
-    title: typeof source.title === "string" && source.title.trim() ? source.title.trim() : sourceType === "playlist" ? `Playlist ${source.sourceId || ""}`.trim() : `Track ${source.sourceId || ""}`.trim(),
-    url: typeof source.url === "string" ? source.url : "",
-    sourceType,
-    sourceId: typeof source.sourceId === "string" ? source.sourceId.trim() : "",
-    origin: source.origin === "youtube-music" ? "youtube-music" : "youtube",
-    volume: clamp(toNumber(source.volume, 100), 0, 100),
-    loop: Boolean(source.loop),
-    startSeconds,
-    runtime: {
-      status: source.runtime?.status === TRANSPORT_PLAYING ? TRANSPORT_PLAYING : source.runtime?.status === TRANSPORT_PAUSED ? TRANSPORT_PAUSED : TRANSPORT_STOPPED,
-      pauseOffsetSec: Math.max(0, toNumber(source.runtime?.pauseOffsetSec, startSeconds)),
-      playingSince: Number.isFinite(source.runtime?.playingSince) ? Number(source.runtime.playingSince) : null,
-      playlistIndex: Math.max(0, toNumber(source.runtime?.playlistIndex, 0)),
-      playlistVideoId: typeof source.runtime?.playlistVideoId === "string" ? source.runtime.playlistVideoId : null,
-      cycle: Math.max(0, toNumber(source.runtime?.cycle, 0)),
-      lastSyncAt: Math.max(0, toNumber(source.runtime?.lastSyncAt, 0))
-    }
-  };
-}
-function createEmptyRoomState() {
-  return {
-    version: 1,
-    revision: 0,
-    activeScene: null,
-    transport: {
-      status: TRANSPORT_STOPPED,
-      masterVolume: 85,
-      changedAt: safeNow()
-    },
-    layers: []
-  };
-}
-function ensureRoomState(value) {
-  if (!value || typeof value !== "object") {
-    return {
-      version: 1,
-      revision: 0,
-      activeScene: null,
-      transport: {
-        status: TRANSPORT_STOPPED,
-        masterVolume: 85,
-        changedAt: 0
-      },
-      layers: []
-    };
-  }
-  const transportStatus = value.transport?.status;
-  const transport = {
-    status: transportStatus === TRANSPORT_PLAYING ? TRANSPORT_PLAYING : transportStatus === TRANSPORT_PAUSED ? TRANSPORT_PAUSED : TRANSPORT_STOPPED,
-    masterVolume: clamp(toNumber(value.transport?.masterVolume, 85), 0, 100),
-    changedAt: Math.max(0, toNumber(value.transport?.changedAt, 0))
-  };
-  return {
-    version: 1,
-    revision: Math.max(0, toNumber(value.revision, 0)),
-    activeScene: value.activeScene && typeof value.activeScene === "object" ? {
-      id: typeof value.activeScene.id === "string" && value.activeScene.id.trim() ? value.activeScene.id.trim() : buildStableFallbackId("scene", [value.activeScene.name || "live-mix"]),
-      name: typeof value.activeScene.name === "string" && value.activeScene.name.trim() ? value.activeScene.name.trim() : "Live mix"
-    } : null,
-    transport,
-    layers: Array.isArray(value.layers) ? value.layers.map((layer, index) => createLayer(layer, index)).filter((layer) => layer.sourceId) : []
-  };
-}
-function buildRoomStateApplyKey(roomState) {
-  return JSON.stringify(ensureRoomState(roomState));
-}
-function computeLayerPosition(layer, at = safeNow()) {
-  if (!layer) {
-    return 0;
-  }
-  const pauseOffset = Math.max(
-    0,
-    toNumber(layer.runtime?.pauseOffsetSec, toNumber(layer.startSeconds, 0))
-  );
-  if (layer.runtime?.status !== TRANSPORT_PLAYING || !layer.runtime?.playingSince) {
-    return pauseOffset;
-  }
-  const deltaMs = Math.max(0, at - Number(layer.runtime.playingSince));
-  return Math.max(0, pauseOffset + deltaMs / 1e3);
-}
 function createClientStatus(partial = {}) {
   return {
     updatedAt: safeNow(),
@@ -3677,33 +3587,308 @@ function createClientStatus(partial = {}) {
   };
 }
 
+// src/extension/scene-model.js
+var ROOM_RUNTIME_VERSION = 2;
+var MAX_TRACKS_PER_SCENE = 10;
+var MAX_ACTIVE_SCENES = 3;
+var DEFAULT_GLOBAL_FADE_MS = 1500;
+var DEFAULT_SCENE_COLOR = "#6b5cff";
+var LAUNCH_MODE_ADD = "add";
+var LAUNCH_MODE_REPLACE = "replace";
+var SCENE_STATUS_PLAYING = "playing";
+var SCENE_STATUS_PAUSED = "paused";
+var SCENE_STATUS_STOPPED = "stopped";
+var SCENE_STATUS_FADING_IN = "fading_in";
+var SCENE_STATUS_FADING_OUT = "fading_out";
+var TRACK_STATUS_QUEUED = "queued";
+var TRACK_STATUS_PLAYING = "playing";
+var TRACK_STATUS_PAUSED = "paused";
+var TRACK_STATUS_STOPPED = "stopped";
+var TRACK_STATUS_FADING_IN = "fading_in";
+var TRACK_STATUS_FADING_OUT = "fading_out";
+function toNumber2(value, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+function normalizeText(value, fallback = "") {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text || fallback;
+}
+function normalizePositiveInt(value, fallback = 0) {
+  return Math.max(0, Math.round(toNumber2(value, fallback)));
+}
+function normalizeSceneSourceType(value) {
+  if (value?.sourceType === "youtube_music" || value?.origin === "youtube-music") {
+    return "youtube_music";
+  }
+  if (value?.sourceType === "youtube" || value?.origin === "youtube") {
+    return "youtube";
+  }
+  return value?.origin === "youtube-music" ? "youtube_music" : "youtube";
+}
+function normalizeMediaType(value) {
+  if (value?.mediaType === "playlist" || value?.sourceType === "playlist") {
+    return "playlist";
+  }
+  return "video";
+}
+function normalizeLaunchMode(value) {
+  return value === LAUNCH_MODE_REPLACE ? LAUNCH_MODE_REPLACE : LAUNCH_MODE_ADD;
+}
+function normalizeTransportStatus(value) {
+  if (value === TRANSPORT_PLAYING) {
+    return TRANSPORT_PLAYING;
+  }
+  if (value === TRANSPORT_PAUSED) {
+    return TRANSPORT_PAUSED;
+  }
+  return TRANSPORT_STOPPED;
+}
+function normalizeSceneStatus(value) {
+  switch (value) {
+    case SCENE_STATUS_PLAYING:
+    case SCENE_STATUS_PAUSED:
+    case SCENE_STATUS_FADING_IN:
+    case SCENE_STATUS_FADING_OUT:
+      return value;
+    default:
+      return SCENE_STATUS_STOPPED;
+  }
+}
+function normalizeTrackStatus(value) {
+  switch (value) {
+    case TRACK_STATUS_PLAYING:
+    case TRACK_STATUS_PAUSED:
+    case TRACK_STATUS_FADING_IN:
+    case TRACK_STATUS_FADING_OUT:
+    case TRACK_STATUS_QUEUED:
+      return value;
+    default:
+      return TRACK_STATUS_STOPPED;
+  }
+}
+function normalizeOptionalStatus(value, fallback = null) {
+  if (value == null || value === "") {
+    return fallback;
+  }
+  return value;
+}
+function createEmptyRoomRuntime(now = safeNow()) {
+  return {
+    version: ROOM_RUNTIME_VERSION,
+    updatedAt: normalizePositiveInt(now, 0),
+    transport: {
+      status: TRANSPORT_STOPPED,
+      launchMode: LAUNCH_MODE_ADD,
+      masterVolume: 85,
+      globalFadeMs: DEFAULT_GLOBAL_FADE_MS
+    },
+    activeScenes: []
+  };
+}
+function ensureActiveTrack(value, fallbackIndex = 0) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const sourceId = normalizeText(value.sourceId);
+  if (!sourceId) {
+    return null;
+  }
+  return {
+    trackId: normalizeText(
+      value.trackId ?? value.id,
+      buildStableFallbackId(
+        "active-track",
+        [value.title, value.sourceType, sourceId],
+        fallbackIndex
+      )
+    ),
+    title: normalizeText(value.title, `Track ${sourceId}`),
+    sourceType: normalizeSceneSourceType(value),
+    mediaType: normalizeMediaType(value),
+    sourceId,
+    volume: clamp(toNumber2(value.volume, 100), 0, 100),
+    loop: Boolean(value.loop),
+    startDelayMs: normalizePositiveInt(value.startDelayMs, 0),
+    startOffsetSec: Math.max(0, toNumber2(value.startOffsetSec, 0)),
+    fadeInMs: normalizePositiveInt(value.fadeInMs, DEFAULT_GLOBAL_FADE_MS),
+    fadeOutMs: normalizePositiveInt(value.fadeOutMs, DEFAULT_GLOBAL_FADE_MS),
+    effectiveOrder: normalizePositiveInt(value.effectiveOrder ?? value.order, fallbackIndex),
+    activationScenePositionMs: normalizePositiveInt(value.activationScenePositionMs, 0),
+    status: normalizeTrackStatus(value.status),
+    nextStatus: normalizeOptionalStatus(value.nextStatus),
+    fadeStartedAt: normalizePositiveInt(value.fadeStartedAt, 0),
+    fadeEndsAt: normalizePositiveInt(value.fadeEndsAt, 0)
+  };
+}
+function ensureActiveScene(value, fallbackIndex = 0) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const sceneName = normalizeText(value.name, "Active scene");
+  return {
+    sceneId: normalizeText(
+      value.sceneId ?? value.id,
+      buildStableFallbackId("active-scene", [sceneName], fallbackIndex)
+    ),
+    name: sceneName,
+    color: normalizeText(value.color, DEFAULT_SCENE_COLOR),
+    order: normalizePositiveInt(value.order, fallbackIndex),
+    sceneVolume: clamp(toNumber2(value.sceneVolume ?? value.volume, 100), 0, 100),
+    loop: Boolean(value.loop),
+    status: normalizeSceneStatus(value.status),
+    nextStatus: normalizeOptionalStatus(value.nextStatus),
+    positionMs: normalizePositiveInt(value.positionMs, 0),
+    startedAt: normalizePositiveInt(value.startedAt, 0),
+    pausedAt: normalizePositiveInt(value.pausedAt, 0),
+    fadeStartedAt: normalizePositiveInt(value.fadeStartedAt, 0),
+    fadeEndsAt: normalizePositiveInt(value.fadeEndsAt, 0),
+    tracks: Array.isArray(value.tracks) ? value.tracks.map((track, index) => ensureActiveTrack(track, index)).filter(Boolean).sort((left, right) => left.effectiveOrder - right.effectiveOrder || left.title.localeCompare(right.title)).slice(0, MAX_TRACKS_PER_SCENE) : []
+  };
+}
+function ensureRoomRuntime(value) {
+  if (!value || typeof value !== "object") {
+    return createEmptyRoomRuntime(0);
+  }
+  const activeScenes = Array.isArray(value.activeScenes) ? value.activeScenes.map((scene, index) => ensureActiveScene(scene, index)).filter(Boolean).slice(0, MAX_ACTIVE_SCENES) : [];
+  return {
+    version: ROOM_RUNTIME_VERSION,
+    updatedAt: normalizePositiveInt(value.updatedAt, 0),
+    transport: {
+      status: normalizeTransportStatus(value.transport?.status),
+      launchMode: normalizeLaunchMode(value.transport?.launchMode),
+      masterVolume: clamp(toNumber2(value.transport?.masterVolume, 85), 0, 100),
+      globalFadeMs: normalizePositiveInt(value.transport?.globalFadeMs, DEFAULT_GLOBAL_FADE_MS) || DEFAULT_GLOBAL_FADE_MS
+    },
+    activeScenes
+  };
+}
+function computeEffectiveTrackVolume({
+  masterVolume = 100,
+  sceneVolume = 100,
+  trackVolume = 100,
+  localPlayerVolume = 100
+} = {}) {
+  return clamp(
+    toNumber2(masterVolume, 100) * toNumber2(sceneVolume, 100) * toNumber2(trackVolume, 100) * toNumber2(localPlayerVolume, 100) / 1e6,
+    0,
+    100
+  );
+}
+
+// src/extension/scene-runtime.js
+function cloneRuntime(runtime) {
+  return deepClone(ensureRoomRuntime(runtime));
+}
+function setTransportStatus(runtime, now = safeNow()) {
+  const activeScenes = runtime.activeScenes.filter((scene) => scene.status !== SCENE_STATUS_STOPPED);
+  if (!activeScenes.length) {
+    runtime.transport.status = TRANSPORT_STOPPED;
+    runtime.updatedAt = now;
+    return runtime;
+  }
+  const anyScenePlaying = activeScenes.some((scene) => scene.status === SCENE_STATUS_PLAYING || scene.status === SCENE_STATUS_FADING_IN || scene.status === SCENE_STATUS_FADING_OUT && scene.nextStatus !== SCENE_STATUS_PAUSED);
+  runtime.transport.status = anyScenePlaying ? TRANSPORT_PLAYING : TRANSPORT_PAUSED;
+  runtime.updatedAt = now;
+  return runtime;
+}
+function computeSceneTimelinePosition(sceneRuntime, now = safeNow()) {
+  const scene = sceneRuntime || {};
+  const basePosition = Math.max(0, Number(scene.positionMs) || 0);
+  const startedAt = Math.max(0, Number(scene.startedAt) || 0);
+  if (!startedAt) {
+    return basePosition;
+  }
+  return Math.max(0, basePosition + (Math.max(now, startedAt) - startedAt));
+}
+function finalizeRuntimeTransitions(runtime, now = safeNow()) {
+  const nextRuntime = cloneRuntime(runtime);
+  nextRuntime.activeScenes = nextRuntime.activeScenes.flatMap((scene) => {
+    if (scene.fadeEndsAt && scene.fadeEndsAt <= now && scene.nextStatus) {
+      scene.status = scene.nextStatus;
+      scene.nextStatus = null;
+      scene.fadeStartedAt = 0;
+      scene.fadeEndsAt = 0;
+    }
+    scene.tracks = scene.tracks.flatMap((track) => {
+      if (track.fadeEndsAt && track.fadeEndsAt <= now && track.nextStatus) {
+        track.status = track.nextStatus;
+        track.nextStatus = null;
+        track.fadeStartedAt = 0;
+        track.fadeEndsAt = 0;
+      }
+      return track.status === TRACK_STATUS_STOPPED ? [] : [track];
+    });
+    if (scene.status === SCENE_STATUS_STOPPED) {
+      return [];
+    }
+    return [scene];
+  });
+  return setTransportStatus(nextRuntime, now);
+}
+
+// src/extension/scene-playback.js
+function buildPlaybackSlotId(sceneId, trackId) {
+  return `${sceneId}::${trackId}`;
+}
+function computeFadeGain({
+  status,
+  fadeStartedAt = 0,
+  fadeEndsAt = 0,
+  now = safeNow()
+} = {}) {
+  if (status === SCENE_STATUS_FADING_IN || status === TRACK_STATUS_FADING_IN) {
+    if (!fadeEndsAt || fadeEndsAt <= fadeStartedAt) {
+      return 1;
+    }
+    return clamp((now - fadeStartedAt) / (fadeEndsAt - fadeStartedAt), 0, 1);
+  }
+  if (status === SCENE_STATUS_FADING_OUT || status === TRACK_STATUS_FADING_OUT) {
+    if (!fadeEndsAt || fadeEndsAt <= fadeStartedAt) {
+      return 0;
+    }
+    return clamp((fadeEndsAt - now) / (fadeEndsAt - fadeStartedAt), 0, 1);
+  }
+  if (status === SCENE_STATUS_PAUSED || status === TRACK_STATUS_PAUSED) {
+    return 0;
+  }
+  return 1;
+}
+function computeScenePlaybackGain(sceneRuntime, now = safeNow()) {
+  return computeFadeGain({
+    status: sceneRuntime?.status,
+    fadeStartedAt: sceneRuntime?.fadeStartedAt,
+    fadeEndsAt: sceneRuntime?.fadeEndsAt,
+    now
+  });
+}
+function computeTrackPlaybackGain(trackRuntime, now = safeNow()) {
+  return computeFadeGain({
+    status: trackRuntime?.status,
+    fadeStartedAt: trackRuntime?.fadeStartedAt,
+    fadeEndsAt: trackRuntime?.fadeEndsAt,
+    now
+  });
+}
+function computeSceneConfiguredLengthMs(sceneDefinition, durationByTrackId = {}) {
+  if (!Array.isArray(sceneDefinition?.tracks) || !sceneDefinition.tracks.length) {
+    return 0;
+  }
+  let maxLengthMs = 0;
+  for (const track of sceneDefinition.tracks) {
+    const rawDurationSec = Number(durationByTrackId?.[track.id] ?? durationByTrackId?.[track.trackId] ?? 0) || 0;
+    const durationMs = Math.max(0, rawDurationSec * 1e3);
+    const trackSpanMs = Math.max(
+      0,
+      (Number(track.startDelayMs) || 0) + Math.max(0, durationMs - (Number(track.startOffsetSec) || 0) * 1e3)
+    );
+    maxLengthMs = Math.max(maxLengthMs, trackSpanMs);
+  }
+  return maxLengthMs;
+}
+
 // src/extension/sync-logic.js
 var END_CONFIRM_TOLERANCE_SEC = 1.5;
-function buildRoomStateApplyKey2(roomState) {
-  return buildRoomStateApplyKey(roomState);
-}
-function isActivePlaybackState(playerState, playerStates = {}) {
-  return playerState === playerStates.PLAYING || playerState === playerStates.BUFFERING;
-}
-function shouldSkipRedundantPlaybackApply({
-  hadSamePlan,
-  sourceChanged,
-  playerState
-}, playerStates = {}) {
-  return !sourceChanged && hadSamePlan && isActivePlaybackState(playerState, playerStates);
-}
-function shouldRecoverPlayback({
-  sourceChanged,
-  playerState
-}, playerStates = {}) {
-  return sourceChanged || !isActivePlaybackState(playerState, playerStates);
-}
-function shouldResetSyncLoopForRoleChange(currentIsGm, nextRole) {
-  return currentIsGm !== (nextRole === "GM");
-}
-function shouldWritePeriodicSyncUpdate(layer, snapshot) {
-  return layer?.sourceType === "playlist" && (snapshot?.playlistIndex !== layer.runtime?.playlistIndex || snapshot?.videoId !== layer.runtime?.playlistVideoId);
-}
 function isConfirmedTrackEnd(snapshot, toleranceSec = END_CONFIRM_TOLERANCE_SEC) {
   const duration = Number(snapshot?.duration) || 0;
   const currentTime = Math.max(0, Number(snapshot?.currentTime) || 0);
@@ -3714,21 +3899,28 @@ function isConfirmedTrackEnd(snapshot, toleranceSec = END_CONFIRM_TOLERANCE_SEC)
 }
 
 // src/extension/background.js
+var LOCAL_RECONCILE_INTERVAL_MS = 500;
 var playerHost = document.getElementById("youtube-player-host");
 var statusElement = document.getElementById("background-status");
-var currentRoomState = createEmptyRoomState();
-var isGm = false;
-var syncIntervalHandle = null;
+var currentRuntime = createEmptyRoomRuntime();
+var currentRuntimeKey = JSON.stringify(ensureRoomRuntime(currentRuntime));
 var statusState = createClientStatus();
-var writeInFlight = false;
 var youtubeApiPromise = null;
+var reconcileIntervalHandle = null;
+var reconcileInFlight = false;
+var reconcilePending = false;
+var pendingAnnounce = false;
 var localOutputVolume = getLocalOutputVolume();
-var lastAppliedRoomStateKey = buildRoomStateApplyKey2(currentRoomState);
+var lastStatusSummaryKey = "";
+var currentPlanBySlotId = /* @__PURE__ */ new Map();
 var slots = /* @__PURE__ */ new Map();
 function updateBackgroundStatus(text) {
   if (statusElement) {
     statusElement.textContent = text;
   }
+}
+function normalizeRuntimeKey(runtime) {
+  return JSON.stringify(ensureRoomRuntime(runtime));
 }
 function loadYouTubeApi() {
   if (window.YT?.Player) {
@@ -3782,71 +3974,67 @@ async function publishClientStatus(patch = {}) {
     [CLIENT_STATUS_KEY]: statusState
   });
 }
-function clearScheduledPlay(slot) {
+function clearScheduledPlayback(slot) {
   if (slot.scheduledPlayHandle) {
     window.clearTimeout(slot.scheduledPlayHandle);
     slot.scheduledPlayHandle = 0;
   }
+  slot.scheduledActionKey = "";
 }
 async function getPlayerSnapshot(slot) {
   await slot.readyPromise;
   const player = slot.player;
   const videoData = typeof player.getVideoData === "function" ? player.getVideoData() : {};
-  return {
+  const snapshot = {
     currentTime: typeof player.getCurrentTime === "function" ? Number(player.getCurrentTime()) || 0 : 0,
     playlistIndex: typeof player.getPlaylistIndex === "function" ? Math.max(0, Number(player.getPlaylistIndex()) || 0) : 0,
     playerState: typeof player.getPlayerState === "function" ? player.getPlayerState() : -1,
     videoId: typeof videoData?.video_id === "string" ? videoData.video_id : null,
     duration: typeof player.getDuration === "function" ? Math.max(0, Number(player.getDuration()) || 0) : 0
   };
+  if (snapshot.duration > 0) {
+    slot.durationSec = snapshot.duration;
+  }
+  return snapshot;
 }
-function desiredSourceKey(layer) {
-  return `${layer.sourceType}:${layer.sourceId}`;
+function desiredSourceKey(entry) {
+  return `${entry.mediaType}:${entry.sourceId}`;
 }
-function buildPlaybackPlanKey(layer) {
+function buildScheduledActionKey(entry, startAtMs) {
   return [
-    desiredSourceKey(layer),
-    Math.max(0, Number(layer.runtime?.cycle) || 0),
-    Math.max(0, Number(layer.runtime?.playlistIndex) || 0),
-    Math.max(0, Number(layer.runtime?.playingSince) || 0),
-    Math.round(Math.max(0, Number(layer.runtime?.pauseOffsetSec) || 0) * 1e3)
+    desiredSourceKey(entry),
+    Math.round(startAtMs / 25),
+    Math.round(entry.desiredPositionSec * 1e3),
+    Math.round(entry.effectiveVolume)
   ].join("|");
 }
-function shouldReloadLayer(slot, layer) {
-  return slot.sourceKey !== desiredSourceKey(layer) || slot.lastCycle !== layer.runtime.cycle || layer.sourceType === "playlist" && slot.playlistIndex !== layer.runtime.playlistIndex;
+function shouldReloadSlot(slot, entry) {
+  return slot.sourceKey !== desiredSourceKey(entry);
 }
-function computeEffectiveVolume(transport, layer) {
-  return clamp(
-    transport.masterVolume * layer.volume * localOutputVolume / 1e4,
-    0,
-    100
-  );
-}
-function applyLayerVolume(slot, transport, layer) {
-  slot.player.setVolume(computeEffectiveVolume(transport, layer));
+function applyEntryVolume(slot, volume) {
+  slot.player.setVolume(clamp(Number(volume) || 0, 0, 100));
 }
 function isPlayingState(playerState) {
-  return playerState === window.YT?.PlayerState?.PLAYING;
+  return playerState === window.YT?.PlayerState?.PLAYING || playerState === window.YT?.PlayerState?.BUFFERING;
 }
 function normalizeVolumeValue(value, fallback = 100) {
   const numeric = Number(value);
   return clamp(Number.isFinite(numeric) ? numeric : fallback, 0, 100);
 }
-async function createSlot(layerId) {
+async function createSlot(slotId) {
   const host = document.createElement("div");
   host.className = "youtube-player-slot";
-  host.dataset.layerId = layerId;
+  host.dataset.slotId = slotId;
   playerHost?.append(host);
   const slot = {
-    layerId,
+    slotId,
     host,
     player: null,
     readyPromise: null,
     sourceKey: "",
-    playlistIndex: 0,
-    lastCycle: 0,
-    playPlanKey: "",
-    scheduledPlayHandle: 0
+    scheduledActionKey: "",
+    scheduledPlayHandle: 0,
+    durationSec: 0
   };
   slot.readyPromise = (async () => {
     const YT = await loadYouTubeApi();
@@ -3866,33 +4054,32 @@ async function createSlot(layerId) {
         },
         events: {
           onReady: () => resolve(),
-          onStateChange: (event) => handlePlayerStateChange(layerId, event.data),
-          onError: (event) => handlePlayerError(layerId, event.data),
-          onAutoplayBlocked: () => handleAutoplayBlocked(layerId)
+          onStateChange: (event) => handlePlayerStateChange(slotId, event.data),
+          onError: (event) => handlePlayerError(slotId, event.data),
+          onAutoplayBlocked: () => handleAutoplayBlocked(slotId)
         }
       });
     });
   })();
-  slots.set(layerId, slot);
-  publishClientStatus({
+  slots.set(slotId, slot);
+  await publishClientStatus({
     slotCount: slots.size,
-    lastAction: `Created slot for ${layerId}`
-  }).catch(() => {
+    lastAction: `Created slot for ${slotId}`
   });
   return slot;
 }
-async function getSlot(layerId) {
-  if (slots.has(layerId)) {
-    return slots.get(layerId);
+async function getSlot(slotId) {
+  if (slots.has(slotId)) {
+    return slots.get(slotId);
   }
-  return createSlot(layerId);
+  return createSlot(slotId);
 }
-async function destroySlot(layerId) {
-  const slot = slots.get(layerId);
+async function destroySlot(slotId) {
+  const slot = slots.get(slotId);
   if (!slot) {
     return;
   }
-  clearScheduledPlay(slot);
+  clearScheduledPlayback(slot);
   try {
     await slot.readyPromise;
     if (typeof slot.player?.destroy === "function") {
@@ -3901,59 +4088,52 @@ async function destroySlot(layerId) {
   } catch {
   }
   slot.host.remove();
-  slots.delete(layerId);
-  await publishClientStatus({
-    slotCount: slots.size,
-    lastAction: `Removed slot for ${layerId}`
-  });
+  slots.delete(slotId);
 }
-function markLayerPrepared(slot, layer) {
-  slot.sourceKey = desiredSourceKey(layer);
-  slot.lastCycle = layer.runtime.cycle;
-  slot.playlistIndex = layer.runtime.playlistIndex;
+function markEntryPrepared(slot, entry) {
+  slot.sourceKey = desiredSourceKey(entry);
 }
-function cueLayerForPlayback(slot, layer, desiredPositionSec) {
-  const player = slot.player;
-  if (layer.sourceType === "playlist") {
-    player.cuePlaylist({
+function cueEntryPlayback(slot, entry, desiredPositionSec) {
+  if (entry.mediaType === "playlist") {
+    slot.player.cuePlaylist({
       listType: "playlist",
-      list: layer.sourceId,
-      index: layer.runtime.playlistIndex,
+      list: entry.sourceId,
+      index: 0,
       startSeconds: desiredPositionSec
     });
   } else {
-    player.cueVideoById({
-      videoId: layer.sourceId,
+    slot.player.cueVideoById({
+      videoId: entry.sourceId,
       startSeconds: desiredPositionSec
     });
   }
-  markLayerPrepared(slot, layer);
+  markEntryPrepared(slot, entry);
 }
-function loadLayerForPlayback(slot, layer, desiredPositionSec) {
-  if (layer.sourceType === "playlist") {
+function loadEntryPlayback(slot, entry, desiredPositionSec) {
+  if (entry.mediaType === "playlist") {
     slot.player.loadPlaylist({
       listType: "playlist",
-      list: layer.sourceId,
-      index: layer.runtime.playlistIndex,
+      list: entry.sourceId,
+      index: 0,
       startSeconds: desiredPositionSec
     });
   } else {
     slot.player.loadVideoById({
-      videoId: layer.sourceId,
+      videoId: entry.sourceId,
       startSeconds: desiredPositionSec
     });
   }
-  markLayerPrepared(slot, layer);
+  markEntryPrepared(slot, entry);
 }
-async function ensureLayerPrepared(slot, layer, desiredPositionSec, mode = "cue") {
+async function ensureEntryPrepared(slot, entry, desiredPositionSec, mode = "cue") {
   await slot.readyPromise;
-  if (!shouldReloadLayer(slot, layer)) {
+  if (!shouldReloadSlot(slot, entry)) {
     return false;
   }
   if (mode === "load") {
-    loadLayerForPlayback(slot, layer, desiredPositionSec);
+    loadEntryPlayback(slot, entry, desiredPositionSec);
   } else {
-    cueLayerForPlayback(slot, layer, desiredPositionSec);
+    cueEntryPlayback(slot, entry, desiredPositionSec);
   }
   return true;
 }
@@ -3963,19 +4143,19 @@ async function seekIfNeeded(slot, desiredPositionSec) {
     slot.player.seekTo(desiredPositionSec, true);
   }
 }
-async function startLayerPlayback(slot, layer, reason = "Playback start") {
-  const desiredPositionSec = computeLayerPosition(layer, safeNow());
-  const sourceChanged = await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
+async function startEntryPlayback(slot, entry, reason = "Playback start") {
+  const desiredPositionSec = Math.max(0, Number(entry.desiredPositionSec) || 0);
+  const sourceChanged = await ensureEntryPrepared(slot, entry, desiredPositionSec, "cue");
   if (!sourceChanged) {
     await seekIfNeeded(slot, desiredPositionSec);
   }
-  applyLayerVolume(slot, currentRoomState.transport, layer);
+  applyEntryVolume(slot, entry.effectiveVolume);
   slot.player.playVideo();
   await publishClientStatus({
     autoplayBlocked: false,
-    lastAction: `${reason} for ${layer.title}`
+    lastAction: `${reason} for ${entry.title}`
   });
-  await wait(350);
+  await wait(300);
   let snapshot = await getPlayerSnapshot(slot);
   if (isPlayingState(snapshot.playerState)) {
     return;
@@ -3985,169 +4165,186 @@ async function startLayerPlayback(slot, layer, reason = "Playback start") {
   }
   if (!isPlayingState(snapshot.playerState)) {
     slot.player.playVideo();
-    await publishClientStatus({
-      autoplayBlocked: false,
-      lastAction: `Fallback playVideo() called for ${layer.title}`
-    });
   }
   await wait(250);
   snapshot = await getPlayerSnapshot(slot);
   if (isPlayingState(snapshot.playerState) || !sourceChanged) {
     return;
   }
-  loadLayerForPlayback(slot, layer, desiredPositionSec);
+  loadEntryPlayback(slot, entry, desiredPositionSec);
   slot.player.playVideo();
-  await publishClientStatus({
-    autoplayBlocked: false,
-    lastAction: `Fallback source reload for ${layer.title}`
-  });
 }
-async function schedulePlayback(slot, layer) {
-  const planKey = buildPlaybackPlanKey(layer);
-  if (slot.playPlanKey === planKey && slot.scheduledPlayHandle) {
+function computeResolvedTrackTiming(scene, track, scenePositionMs, durationSec = 0) {
+  const activationMs = Math.max(0, Number(track.activationScenePositionMs) || 0) + Math.max(0, Number(track.startDelayMs) || 0);
+  const startOffsetSec = Math.max(0, Number(track.startOffsetSec) || 0);
+  const startOffsetMs = startOffsetSec * 1e3;
+  if (scenePositionMs < activationMs) {
+    return {
+      ready: false,
+      ended: false,
+      desiredPositionSec: startOffsetSec,
+      nextStartDelayMs: activationMs - scenePositionMs
+    };
+  }
+  let playheadMs = scenePositionMs - activationMs + startOffsetMs;
+  const durationMs = Math.max(0, Number(durationSec) || 0) * 1e3;
+  if (durationMs > 0) {
+    if (track.loop) {
+      playheadMs %= durationMs;
+    } else if (playheadMs >= durationMs) {
+      return {
+        ready: false,
+        ended: true,
+        desiredPositionSec: durationSec,
+        nextStartDelayMs: 0
+      };
+    }
+  }
+  return {
+    ready: true,
+    ended: false,
+    desiredPositionSec: Math.max(0, playheadMs / 1e3),
+    nextStartDelayMs: 0
+  };
+}
+function sortScenes(runtime) {
+  return runtime.activeScenes.slice().sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+}
+function sortTracks(scene) {
+  return scene.tracks.slice().sort((left, right) => left.effectiveOrder - right.effectiveOrder || left.title.localeCompare(right.title));
+}
+function buildRuntimePlaybackPlan(runtime, now = safeNow()) {
+  const normalizedRuntime = finalizeRuntimeTransitions(runtime, now);
+  const entries = [];
+  for (const scene of sortScenes(normalizedRuntime)) {
+    const durationByTrackId = {};
+    for (const track of scene.tracks) {
+      const slot = slots.get(buildPlaybackSlotId(scene.sceneId, track.trackId));
+      if (slot?.durationSec > 0) {
+        durationByTrackId[track.trackId] = slot.durationSec;
+      }
+    }
+    const sceneLengthMs = computeSceneConfiguredLengthMs(
+      { tracks: scene.tracks },
+      durationByTrackId
+    );
+    const absoluteScenePositionMs = computeSceneTimelinePosition(scene, now);
+    const cycleScenePositionMs = scene.loop && sceneLengthMs > 0 ? absoluteScenePositionMs % sceneLengthMs : absoluteScenePositionMs;
+    const sceneGain = computeScenePlaybackGain(scene, now);
+    const scenePaused = scene.status === TRANSPORT_PAUSED;
+    for (const track of sortTracks(scene)) {
+      const durationSec = Number(durationByTrackId[track.trackId] || 0) || 0;
+      const timing = computeResolvedTrackTiming(scene, track, cycleScenePositionMs, durationSec);
+      let desiredStatus = TRANSPORT_PLAYING;
+      if (track.status === TRANSPORT_STOPPED || timing.ended) {
+        desiredStatus = TRANSPORT_STOPPED;
+      } else if (scenePaused || track.status === TRANSPORT_PAUSED) {
+        desiredStatus = TRANSPORT_PAUSED;
+      } else if (!timing.ready) {
+        desiredStatus = "queued";
+      }
+      const baseVolume = computeEffectiveTrackVolume({
+        masterVolume: normalizedRuntime.transport.masterVolume,
+        sceneVolume: scene.sceneVolume,
+        trackVolume: track.volume,
+        localPlayerVolume: localOutputVolume
+      });
+      const trackGain = computeTrackPlaybackGain(track, now);
+      entries.push({
+        slotId: buildPlaybackSlotId(scene.sceneId, track.trackId),
+        sceneId: scene.sceneId,
+        trackId: track.trackId,
+        title: track.title,
+        sourceType: track.sourceType,
+        mediaType: track.mediaType || "video",
+        sourceId: track.sourceId,
+        desiredStatus,
+        desiredPositionSec: timing.desiredPositionSec,
+        nextStartDelayMs: timing.nextStartDelayMs,
+        effectiveVolume: clamp(baseVolume * sceneGain * trackGain, 0, 100)
+      });
+    }
+  }
+  return {
+    runtime: normalizedRuntime,
+    entries
+  };
+}
+async function scheduleEntryPlayback(slot, entry) {
+  const startAtMs = safeNow() + Math.max(0, Number(entry.nextStartDelayMs) || 0);
+  const actionKey = buildScheduledActionKey(entry, startAtMs);
+  if (slot.scheduledActionKey === actionKey && slot.scheduledPlayHandle) {
     return;
   }
-  const startAt = layer.runtime.playingSince || safeNow();
-  const desiredPositionSec = computeLayerPosition(layer, startAt);
-  await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
-  clearScheduledPlay(slot);
-  slot.playPlanKey = planKey;
-  const now = safeNow();
-  const delay = Math.max(0, startAt - now);
-  await publishClientStatus({
-    lastAction: `Scheduled play for ${layer.title} in ${delay}ms`
-  });
+  clearScheduledPlayback(slot);
+  slot.scheduledActionKey = actionKey;
+  const delay = Math.max(0, startAtMs - safeNow());
   if (delay <= 75) {
-    await startLayerPlayback(slot, layer, "Immediate play");
+    await startEntryPlayback(slot, entry, "Immediate play");
     return;
   }
   slot.scheduledPlayHandle = window.setTimeout(async () => {
     slot.scheduledPlayHandle = 0;
+    slot.scheduledActionKey = "";
     try {
-      await startLayerPlayback(slot, layer, "Scheduled play");
+      await startEntryPlayback(slot, entry, "Scheduled play");
     } catch {
     }
   }, delay);
 }
-function pickPrimeLayer(roomState) {
-  if (!Array.isArray(roomState.layers) || !roomState.layers.length) {
-    return null;
-  }
-  return roomState.layers.find((layer) => layer.runtime.status === TRANSPORT_PLAYING) || roomState.layers[0];
-}
-async function primeLocalAudio(roomStateOverride = null) {
-  const primeState = ensureRoomState(roomStateOverride || currentRoomState);
-  const layer = pickPrimeLayer(primeState);
-  if (!layer) {
-    await publishClientStatus({
-      lastAction: "Prime requested, but there are no queued layers"
-    });
-    return;
-  }
-  const slot = await getSlot(layer.id);
-  const desiredPositionSec = computeLayerPosition(layer, safeNow());
-  await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
-  try {
-    slot.player.setVolume(0);
-    slot.player.playVideo();
-    await wait(250);
-    slot.player.pauseVideo();
-    slot.player.seekTo(desiredPositionSec, true);
-    applyLayerVolume(slot, primeState.transport, layer);
-    await publishClientStatus({
-      audioPrimed: true,
-      autoplayBlocked: false,
-      slotCount: slots.size,
-      lastAction: `Primed audio with ${layer.title}`
-    });
-  } catch {
-  }
-}
-async function applyLayerState(layer, transport) {
-  const slot = await getSlot(layer.id);
+async function applyEntryState(entry) {
+  const slot = await getSlot(entry.slotId);
   await slot.readyPromise;
-  const desiredPositionSec = computeLayerPosition(layer, safeNow());
-  applyLayerVolume(slot, transport, layer);
-  if (transport.status === TRANSPORT_STOPPED || layer.runtime.status === TRANSPORT_STOPPED) {
-    clearScheduledPlay(slot);
-    slot.playPlanKey = "";
-    await ensureLayerPrepared(slot, layer, layer.startSeconds, "cue");
+  applyEntryVolume(slot, entry.effectiveVolume);
+  if (entry.desiredStatus === TRANSPORT_STOPPED) {
+    clearScheduledPlayback(slot);
+    await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
     slot.player.pauseVideo();
     try {
-      await seekIfNeeded(slot, layer.startSeconds);
+      await seekIfNeeded(slot, entry.desiredPositionSec);
     } catch {
     }
     return;
   }
-  if (transport.status === TRANSPORT_PAUSED || layer.runtime.status === TRANSPORT_PAUSED) {
-    clearScheduledPlay(slot);
-    slot.playPlanKey = "";
-    await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
-    await seekIfNeeded(slot, desiredPositionSec);
+  if (entry.desiredStatus === "queued") {
+    await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
+    slot.player.pauseVideo();
+    try {
+      await seekIfNeeded(slot, entry.desiredPositionSec);
+    } catch {
+    }
+    if (entry.nextStartDelayMs > 0) {
+      await scheduleEntryPlayback(slot, entry);
+    } else {
+      clearScheduledPlayback(slot);
+    }
+    return;
+  }
+  if (entry.desiredStatus === TRANSPORT_PAUSED) {
+    clearScheduledPlayback(slot);
+    await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
+    await seekIfNeeded(slot, entry.desiredPositionSec);
     slot.player.pauseVideo();
     return;
   }
-  const planKey = buildPlaybackPlanKey(layer);
-  const startAt = layer.runtime.playingSince || safeNow();
-  const delay = Math.max(0, startAt - safeNow());
-  if (delay > 75) {
-    await schedulePlayback(slot, layer);
+  if (entry.nextStartDelayMs > 75) {
+    await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
+    await scheduleEntryPlayback(slot, entry);
     return;
   }
-  clearScheduledPlay(slot);
-  const hadSamePlan = slot.playPlanKey === planKey;
-  const sourceChanged = await ensureLayerPrepared(slot, layer, desiredPositionSec, "cue");
-  const snapshot = await getPlayerSnapshot(slot);
-  slot.playPlanKey = planKey;
-  if (shouldSkipRedundantPlaybackApply(
-    {
-      hadSamePlan,
-      sourceChanged,
-      playerState: snapshot.playerState
-    },
-    window.YT?.PlayerState || {}
-  )) {
-    return;
-  }
-  if (shouldRecoverPlayback(
-    {
-      sourceChanged,
-      playerState: snapshot.playerState
-    },
-    window.YT?.PlayerState || {}
-  )) {
-    await startLayerPlayback(slot, layer, sourceChanged ? "Prepared play" : "Recovered play");
-    return;
-  }
-  await seekIfNeeded(slot, desiredPositionSec);
+  clearScheduledPlayback(slot);
+  await startEntryPlayback(slot, entry, "Runtime play");
 }
-async function applyLocalVolumeToActiveSlots() {
-  for (const layer of currentRoomState.layers) {
-    const slot = slots.get(layer.id);
-    if (!slot) {
-      continue;
-    }
-    await slot.readyPromise;
-    applyLayerVolume(slot, currentRoomState.transport, layer);
-  }
-}
-async function applyRoomState(roomState) {
-  const normalizedRoomState = ensureRoomState(roomState);
-  const nextRoomStateKey = buildRoomStateApplyKey2(normalizedRoomState);
-  currentRoomState = normalizedRoomState;
-  if (lastAppliedRoomStateKey === nextRoomStateKey) {
+async function publishRuntimeSummary(runtime, entries, forceLastAction = null) {
+  const summaryKey = JSON.stringify({
+    transportStatus: runtime.transport.status,
+    slotCount: slots.size,
+    activeTitles: entries.map((entry) => entry.title)
+  });
+  if (!forceLastAction && summaryKey === lastStatusSummaryKey) {
     return;
   }
-  lastAppliedRoomStateKey = nextRoomStateKey;
-  const activeLayerIds = new Set(currentRoomState.layers.map((layer) => layer.id));
-  for (const slotId of Array.from(slots.keys())) {
-    if (!activeLayerIds.has(slotId)) {
-      await destroySlot(slotId);
-    }
-  }
-  for (const layer of currentRoomState.layers) {
-    await applyLayerState(layer, currentRoomState.transport);
-  }
+  lastStatusSummaryKey = summaryKey;
   await publishClientStatus({
     engineReady: true,
     backgroundConnected: true,
@@ -4155,128 +4352,150 @@ async function applyRoomState(roomState) {
     audioPrimed: statusState.audioPrimed,
     autoplayBlocked: statusState.autoplayBlocked,
     errors: statusState.errors,
-    transportStatus: currentRoomState.transport.status,
+    transportStatus: runtime.transport.status,
     slotCount: slots.size,
-    lastAction: `Applied room state revision ${currentRoomState.revision}`,
-    activeLayerTitles: currentRoomState.layers.map((layer) => layer.title)
+    lastAction: forceLastAction || statusState.lastAction,
+    activeLayerTitles: entries.map((entry) => entry.title)
   });
+}
+async function performReconcile(announce = false) {
+  const { runtime, entries } = buildRuntimePlaybackPlan(currentRuntime, safeNow());
+  currentPlanBySlotId = new Map(entries.map((entry) => [entry.slotId, entry]));
+  const activeSlotIds = new Set(entries.map((entry) => entry.slotId));
+  for (const slotId of Array.from(slots.keys())) {
+    if (!activeSlotIds.has(slotId)) {
+      await destroySlot(slotId);
+    }
+  }
+  for (const entry of entries) {
+    await applyEntryState(entry);
+  }
+  await publishRuntimeSummary(
+    runtime,
+    entries,
+    announce ? `Applied runtime update (${entries.length} active slot${entries.length === 1 ? "" : "s"})` : null
+  );
   updateBackgroundStatus(
-    currentRoomState.layers.length ? `Audio engine ready: ${currentRoomState.transport.status} (${currentRoomState.layers.length} active layer${currentRoomState.layers.length === 1 ? "" : "s"})` : "Audio engine ready: no active layers"
+    entries.length ? `Audio engine ready: ${runtime.transport.status} (${entries.length} active slot${entries.length === 1 ? "" : "s"})` : "Audio engine ready: no active slots"
   );
 }
-async function writeRoomState(nextState, shouldBroadcast = true) {
-  const normalized = ensureRoomState(nextState);
-  normalized.revision = currentRoomState.revision + 1;
-  lastAppliedRoomStateKey = buildRoomStateApplyKey2(normalized);
-  currentRoomState = normalized;
-  await lib_default.room.setMetadata({
-    [ROOM_STATE_KEY]: normalized
-  });
-  if (shouldBroadcast) {
-    await lib_default.broadcast.sendMessage(
-      BROADCAST_CHANNEL,
-      { roomState: normalized },
-      { destination: "ALL" }
-    );
+async function reconcilePlayback(announce = false) {
+  pendingAnnounce = pendingAnnounce || announce;
+  if (reconcileInFlight) {
+    reconcilePending = true;
+    return;
+  }
+  reconcileInFlight = true;
+  try {
+    do {
+      const runAnnounce = pendingAnnounce;
+      reconcilePending = false;
+      pendingAnnounce = false;
+      await performReconcile(runAnnounce);
+    } while (reconcilePending);
+  } finally {
+    reconcileInFlight = false;
   }
 }
-async function handlePlayerStateChange(layerId, playerState) {
-  if (!isGm) {
+async function applyRuntime(runtime) {
+  const normalizedRuntime = ensureRoomRuntime(runtime);
+  const nextKey = normalizeRuntimeKey(normalizedRuntime);
+  currentRuntime = normalizedRuntime;
+  if (nextKey === currentRuntimeKey) {
+    await reconcilePlayback(false);
     return;
   }
-  const layer = currentRoomState.layers.find((entry) => entry.id === layerId);
-  if (!layer) {
+  currentRuntimeKey = nextKey;
+  await reconcilePlayback(true);
+}
+function pickPrimeEntry(runtimeOverride = null) {
+  const { entries } = buildRuntimePlaybackPlan(runtimeOverride || currentRuntime, safeNow());
+  return entries.find((entry) => entry.desiredStatus === TRANSPORT_PLAYING) || entries.find((entry) => entry.desiredStatus === "queued") || entries[0] || null;
+}
+async function primeLocalAudio(runtimeOverride = null) {
+  const entry = pickPrimeEntry(runtimeOverride);
+  if (!entry) {
+    await publishClientStatus({
+      lastAction: "Prime requested, but there are no queued tracks"
+    });
     return;
   }
-  if (layer.sourceType === "playlist") {
-    return;
+  const slot = await getSlot(entry.slotId);
+  await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
+  try {
+    slot.player.setVolume(0);
+    slot.player.playVideo();
+    await wait(250);
+    slot.player.pauseVideo();
+    slot.player.seekTo(entry.desiredPositionSec, true);
+    applyEntryVolume(slot, entry.effectiveVolume);
+    await publishClientStatus({
+      audioPrimed: true,
+      autoplayBlocked: false,
+      slotCount: slots.size,
+      lastAction: `Primed audio with ${entry.title}`
+    });
+  } catch {
   }
+}
+async function handlePlayerStateChange(slotId, playerState) {
   if (window.YT?.PlayerState?.ENDED !== playerState) {
     return;
   }
-  const slot = slots.get(layerId);
-  if (slot) {
-    const snapshot = await getPlayerSnapshot(slot);
-    if (!isConfirmedTrackEnd(snapshot)) {
-      await startLayerPlayback(slot, layer, "Recovered from false ENDED");
-      return;
-    }
-  }
-  if (writeInFlight) {
+  const slot = slots.get(slotId);
+  if (!slot) {
     return;
   }
-  writeInFlight = true;
-  try {
-    const next = deepClone(currentRoomState);
-    const nextLayer = next.layers.find((entry) => entry.id === layerId);
-    if (!nextLayer) {
-      return;
+  const snapshot = await getPlayerSnapshot(slot);
+  if (!isConfirmedTrackEnd(snapshot)) {
+    const entry2 = currentPlanBySlotId.get(slotId);
+    if (entry2?.desiredStatus === TRANSPORT_PLAYING) {
+      await startEntryPlayback(slot, entry2, "Recovered from false ENDED");
     }
-    if (nextLayer.loop) {
-      const now = safeNow();
-      next.transport.status = TRANSPORT_PLAYING;
-      next.transport.changedAt = now + 1500;
-      nextLayer.runtime.status = TRANSPORT_PLAYING;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-      nextLayer.runtime.playingSince = now + 1500;
-      nextLayer.runtime.cycle += 1;
-      nextLayer.runtime.playlistIndex = 0;
-      nextLayer.runtime.playlistVideoId = null;
-      nextLayer.runtime.lastSyncAt = now;
-      await writeRoomState(next);
-      return;
-    }
-    nextLayer.runtime.status = TRANSPORT_STOPPED;
-    nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-    nextLayer.runtime.playingSince = null;
-    nextLayer.runtime.playlistIndex = 0;
-    nextLayer.runtime.playlistVideoId = null;
-    nextLayer.runtime.lastSyncAt = safeNow();
-    if (next.layers.every((entry) => entry.runtime.status === TRANSPORT_STOPPED)) {
-      next.transport.status = TRANSPORT_STOPPED;
-      next.transport.changedAt = safeNow();
-    }
-    await writeRoomState(next);
-  } finally {
-    writeInFlight = false;
+    return;
+  }
+  const entry = currentPlanBySlotId.get(slotId);
+  if (!entry) {
+    return;
+  }
+  await reconcilePlayback(false);
+  const nextEntry = currentPlanBySlotId.get(slotId);
+  if (nextEntry?.desiredStatus === TRANSPORT_PLAYING) {
+    await startEntryPlayback(slot, nextEntry, "Loop recovery");
   }
 }
-async function handlePlayerError(layerId, code) {
-  const message = code === 101 || code === 150 ? `Layer ${layerId} cannot be embedded by YouTube (error ${code}).` : `Layer ${layerId} failed with YouTube error ${code}.`;
+async function handlePlayerError(slotId, code) {
+  const message = code === 101 || code === 150 ? `Layer ${slotId} cannot be embedded by YouTube (error ${code}).` : `Layer ${slotId} failed with YouTube error ${code}.`;
   const nextErrors = [...statusState.errors || [], message].slice(-8);
   await publishClientStatus({
     ...statusState,
     errors: nextErrors,
-    lastAction: `YouTube error ${code} for ${layerId}`
+    lastAction: `YouTube error ${code} for ${slotId}`
   });
   notifyLocal(message, "WARNING");
 }
-async function handleAutoplayBlocked(layerId) {
-  const message = `Autoplay was blocked for layer ${layerId}. Open the extension panel and retry audio on this browser.`;
+async function handleAutoplayBlocked(slotId) {
+  const message = `Autoplay was blocked for layer ${slotId}. Open the extension panel and retry audio on this browser.`;
   await publishClientStatus({
     ...statusState,
     audioPrimed: false,
     autoplayBlocked: true,
     errors: [...statusState.errors || [], message].slice(-8),
-    lastAction: `Autoplay blocked for ${layerId}`
+    lastAction: `Autoplay blocked for ${slotId}`
   });
   notifyLocal(message, "WARNING");
 }
 async function retryLocalAudio() {
-  const transport = currentRoomState.transport;
-  if (transport.status !== TRANSPORT_PLAYING) {
-    return;
-  }
-  for (const layer of currentRoomState.layers) {
-    if (layer.runtime.status !== TRANSPORT_PLAYING) {
-      continue;
-    }
-    const slot = slots.get(layer.id);
+  const activeEntries = Array.from(currentPlanBySlotId.values()).filter(
+    (entry) => entry.desiredStatus === TRANSPORT_PLAYING
+  );
+  for (const entry of activeEntries) {
+    const slot = slots.get(entry.slotId);
     if (!slot) {
       continue;
     }
-    clearScheduledPlay(slot);
-    await startLayerPlayback(slot, layer, "Manual retry");
+    clearScheduledPlayback(slot);
+    await startEntryPlayback(slot, entry, "Manual retry");
   }
   await publishClientStatus({
     ...statusState,
@@ -4285,84 +4504,20 @@ async function retryLocalAudio() {
     lastAction: "Manual retry requested"
   });
 }
-async function gmPeriodicSync() {
-  if (!isGm || currentRoomState.transport.status !== TRANSPORT_PLAYING || writeInFlight) {
-    return;
-  }
-  writeInFlight = true;
-  try {
-    const next = deepClone(currentRoomState);
-    const now = safeNow();
-    let changed = false;
-    for (const layer of next.layers) {
-      if (layer.runtime.status !== TRANSPORT_PLAYING) {
-        continue;
-      }
-      const slot = slots.get(layer.id);
-      if (!slot) {
-        continue;
-      }
-      const snapshot = await getPlayerSnapshot(slot);
-      if (window.YT?.PlayerState?.ENDED === snapshot.playerState) {
-        if (!isConfirmedTrackEnd(snapshot)) {
-          await startLayerPlayback(slot, layer, "Recovered from false ENDED");
-          continue;
-        }
-        if (layer.loop) {
-          layer.runtime.pauseOffsetSec = layer.startSeconds;
-          layer.runtime.playingSince = now + 1500;
-          layer.runtime.cycle += 1;
-          layer.runtime.playlistIndex = 0;
-          layer.runtime.playlistVideoId = null;
-          layer.runtime.lastSyncAt = now;
-        } else {
-          layer.runtime.status = TRANSPORT_STOPPED;
-          layer.runtime.pauseOffsetSec = layer.startSeconds;
-          layer.runtime.playingSince = null;
-          layer.runtime.playlistIndex = 0;
-          layer.runtime.playlistVideoId = null;
-          layer.runtime.lastSyncAt = now;
-        }
-        changed = true;
-        continue;
-      }
-      if (shouldWritePeriodicSyncUpdate(layer, snapshot)) {
-        layer.runtime.pauseOffsetSec = snapshot.currentTime;
-        layer.runtime.playingSince = now;
-        if (layer.sourceType === "playlist") {
-          layer.runtime.playlistIndex = snapshot.playlistIndex;
-          layer.runtime.playlistVideoId = snapshot.videoId;
-        }
-        layer.runtime.lastSyncAt = now;
-        changed = true;
-      }
-    }
-    if (changed) {
-      if (next.layers.every((entry) => entry.runtime.status === TRANSPORT_STOPPED)) {
-        next.transport.status = TRANSPORT_STOPPED;
-      }
-      next.transport.changedAt = now;
-      await writeRoomState(next);
-    }
-  } finally {
-    writeInFlight = false;
-  }
+async function applyLocalVolumeToActiveSlots() {
+  await reconcilePlayback(false);
 }
-function resetSyncLoop() {
-  if (syncIntervalHandle) {
-    window.clearInterval(syncIntervalHandle);
-    syncIntervalHandle = null;
+function resetReconcileLoop() {
+  if (reconcileIntervalHandle) {
+    window.clearInterval(reconcileIntervalHandle);
+    reconcileIntervalHandle = null;
   }
-  if (!isGm) {
-    return;
-  }
-  syncIntervalHandle = window.setInterval(() => {
-    gmPeriodicSync().catch(() => {
+  reconcileIntervalHandle = window.setInterval(() => {
+    reconcilePlayback(false).catch(() => {
     });
-  }, SYNC_INTERVAL_MS);
+  }, LOCAL_RECONCILE_INTERVAL_MS);
 }
 lib_default.onReady(async () => {
-  isGm = await lib_default.player.getRole() === "GM";
   await publishClientStatus({
     engineReady: true,
     backgroundConnected: true,
@@ -4372,17 +4527,17 @@ lib_default.onReady(async () => {
     lastAction: "Background engine initialized"
   });
   const metadata = await lib_default.room.getMetadata();
-  await applyRoomState(metadata[ROOM_STATE_KEY]);
-  resetSyncLoop();
+  await applyRuntime(metadata[ROOM_STATE_KEY]);
+  resetReconcileLoop();
   lib_default.room.onMetadataChange((nextMetadata) => {
-    applyRoomState(nextMetadata[ROOM_STATE_KEY]).catch(() => {
+    applyRuntime(nextMetadata[ROOM_STATE_KEY]).catch(() => {
     });
   });
   lib_default.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {
     if (!event.data?.roomState) {
       return;
     }
-    applyRoomState(event.data.roomState).catch(() => {
+    applyRuntime(event.data.roomState).catch(() => {
     });
   });
   lib_default.broadcast.onMessage(LOCAL_CONTROL_CHANNEL, (event) => {
@@ -4392,7 +4547,7 @@ lib_default.onReady(async () => {
       return;
     }
     if (event.data?.type === "prime-local-audio") {
-      primeLocalAudio(event.data?.roomState).catch(() => {
+      applyRuntime(event.data?.roomRuntime || event.data?.roomState || currentRuntime).then(() => primeLocalAudio(event.data?.roomRuntime || event.data?.roomState || currentRuntime)).catch(() => {
       });
       return;
     }
@@ -4401,12 +4556,6 @@ lib_default.onReady(async () => {
       setLocalOutputVolume(localOutputVolume);
       applyLocalVolumeToActiveSlots().catch(() => {
       });
-    }
-  });
-  lib_default.player.onChange((player) => {
-    if (shouldResetSyncLoopForRoleChange(isGm, player.role)) {
-      isGm = player.role === "GM";
-      resetSyncLoop();
     }
   });
 });

@@ -3526,7 +3526,6 @@ var LOCAL_OUTPUT_VOLUME_KEY = `${EXTENSION_ID}/local-output-volume`;
 var TRANSPORT_PLAYING = "playing";
 var TRANSPORT_PAUSED = "paused";
 var TRANSPORT_STOPPED = "stopped";
-var START_LEAD_MS = 2500;
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -3604,26 +3603,6 @@ function createLayer(source = {}, fallbackIndex = 0) {
     }
   };
 }
-function createEmptyRoomState() {
-  return {
-    version: 1,
-    revision: 0,
-    activeScene: null,
-    transport: {
-      status: TRANSPORT_STOPPED,
-      masterVolume: 85,
-      changedAt: safeNow()
-    },
-    layers: []
-  };
-}
-function createEmptySceneLibrary() {
-  return {
-    version: 1,
-    updatedAt: safeNow(),
-    scenes: []
-  };
-}
 function ensureRoomState(value) {
   if (!value || typeof value !== "object") {
     return {
@@ -3653,62 +3632,6 @@ function ensureRoomState(value) {
     } : null,
     transport,
     layers: Array.isArray(value.layers) ? value.layers.map((layer, index) => createLayer(layer, index)).filter((layer) => layer.sourceId) : []
-  };
-}
-function computeLayerPosition(layer, at = safeNow()) {
-  if (!layer) {
-    return 0;
-  }
-  const pauseOffset = Math.max(
-    0,
-    toNumber(layer.runtime?.pauseOffsetSec, toNumber(layer.startSeconds, 0))
-  );
-  if (layer.runtime?.status !== TRANSPORT_PLAYING || !layer.runtime?.playingSince) {
-    return pauseOffset;
-  }
-  const deltaMs = Math.max(0, at - Number(layer.runtime.playingSince));
-  return Math.max(0, pauseOffset + deltaMs / 1e3);
-}
-function stripLayerForScene(layer) {
-  return {
-    id: layer.id,
-    title: layer.title,
-    url: layer.url,
-    sourceType: layer.sourceType,
-    sourceId: layer.sourceId,
-    origin: layer.origin,
-    volume: layer.volume,
-    loop: layer.loop,
-    startSeconds: layer.startSeconds
-  };
-}
-function normalizeScene(scene, fallbackIndex = 0) {
-  if (!scene || typeof scene !== "object") {
-    return null;
-  }
-  const layers = Array.isArray(scene.layers) ? scene.layers.map((layer, index) => stripLayerForScene(createLayer(layer, index))).filter((layer) => layer.sourceId) : [];
-  if (!layers.length) {
-    return null;
-  }
-  return {
-    id: typeof scene.id === "string" && scene.id.trim() ? scene.id.trim() : buildStableFallbackId("scene", [scene.name], fallbackIndex),
-    name: typeof scene.name === "string" && scene.name.trim() ? scene.name.trim() : "Untitled scene",
-    updatedAt: Math.max(0, toNumber(scene.updatedAt, 0)),
-    layers
-  };
-}
-function ensureSceneLibrary(value) {
-  if (!value || typeof value !== "object") {
-    return {
-      version: 1,
-      updatedAt: 0,
-      scenes: []
-    };
-  }
-  return {
-    version: 1,
-    updatedAt: Math.max(0, toNumber(value.updatedAt, 0)),
-    scenes: Array.isArray(value.scenes) ? value.scenes.map((scene, index) => normalizeScene(scene, index)).filter(Boolean) : []
   };
 }
 function isYouTubeVideoId(value) {
@@ -3824,12 +3747,929 @@ function summarizeTransport(roomState) {
   return `Stopped ${state2.layers.length} layer${state2.layers.length === 1 ? "" : "s"}`;
 }
 
+// src/extension/scene-model.js
+var LIBRARY_PACK_VERSION = 2;
+var ROOM_RUNTIME_VERSION = 2;
+var MAX_TRACKS_PER_SCENE = 10;
+var MAX_ACTIVE_SCENES = 3;
+var DEFAULT_GLOBAL_FADE_MS = 1500;
+var DEFAULT_SCENE_COLOR = "#6b5cff";
+var LAUNCH_MODE_ADD = "add";
+var LAUNCH_MODE_REPLACE = "replace";
+var SCENE_STATUS_PLAYING = "playing";
+var SCENE_STATUS_PAUSED = "paused";
+var SCENE_STATUS_STOPPED = "stopped";
+var SCENE_STATUS_FADING_IN = "fading_in";
+var SCENE_STATUS_FADING_OUT = "fading_out";
+var TRACK_STATUS_QUEUED = "queued";
+var TRACK_STATUS_PLAYING = "playing";
+var TRACK_STATUS_PAUSED = "paused";
+var TRACK_STATUS_STOPPED = "stopped";
+var TRACK_STATUS_FADING_IN = "fading_in";
+var TRACK_STATUS_FADING_OUT = "fading_out";
+function toNumber2(value, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+function normalizeText(value, fallback = "") {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text || fallback;
+}
+function normalizePositiveInt(value, fallback = 0) {
+  return Math.max(0, Math.round(toNumber2(value, fallback)));
+}
+function normalizeSceneSourceType(value) {
+  if (value?.sourceType === "youtube_music" || value?.origin === "youtube-music") {
+    return "youtube_music";
+  }
+  if (value?.sourceType === "youtube" || value?.origin === "youtube") {
+    return "youtube";
+  }
+  return value?.origin === "youtube-music" ? "youtube_music" : "youtube";
+}
+function normalizeMediaType(value) {
+  if (value?.mediaType === "playlist" || value?.sourceType === "playlist") {
+    return "playlist";
+  }
+  return "video";
+}
+function normalizeLaunchMode(value) {
+  return value === LAUNCH_MODE_REPLACE ? LAUNCH_MODE_REPLACE : LAUNCH_MODE_ADD;
+}
+function normalizeTransportStatus(value) {
+  if (value === TRANSPORT_PLAYING) {
+    return TRANSPORT_PLAYING;
+  }
+  if (value === TRANSPORT_PAUSED) {
+    return TRANSPORT_PAUSED;
+  }
+  return TRANSPORT_STOPPED;
+}
+function normalizeSceneStatus(value) {
+  switch (value) {
+    case SCENE_STATUS_PLAYING:
+    case SCENE_STATUS_PAUSED:
+    case SCENE_STATUS_FADING_IN:
+    case SCENE_STATUS_FADING_OUT:
+      return value;
+    default:
+      return SCENE_STATUS_STOPPED;
+  }
+}
+function normalizeTrackStatus(value) {
+  switch (value) {
+    case TRACK_STATUS_PLAYING:
+    case TRACK_STATUS_PAUSED:
+    case TRACK_STATUS_FADING_IN:
+    case TRACK_STATUS_FADING_OUT:
+    case TRACK_STATUS_QUEUED:
+      return value;
+    default:
+      return TRACK_STATUS_STOPPED;
+  }
+}
+function normalizeOptionalStatus(value, fallback = null) {
+  if (value == null || value === "") {
+    return fallback;
+  }
+  return value;
+}
+function createEmptyLibraryPack(now = safeNow()) {
+  return {
+    version: LIBRARY_PACK_VERSION,
+    exportedAt: normalizePositiveInt(now, 0),
+    scenes: []
+  };
+}
+function createEmptyRoomRuntime(now = safeNow()) {
+  return {
+    version: ROOM_RUNTIME_VERSION,
+    updatedAt: normalizePositiveInt(now, 0),
+    transport: {
+      status: TRANSPORT_STOPPED,
+      launchMode: LAUNCH_MODE_ADD,
+      masterVolume: 85,
+      globalFadeMs: DEFAULT_GLOBAL_FADE_MS
+    },
+    activeScenes: []
+  };
+}
+function ensureSceneTrack(value, fallbackIndex = 0, sceneName = "Scene") {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const sourceId = normalizeText(value.sourceId);
+  if (!sourceId) {
+    return null;
+  }
+  const sourceType = normalizeSceneSourceType(value);
+  const title = normalizeText(value.title, `Track ${sourceId}`);
+  return {
+    id: normalizeText(
+      value.id,
+      buildStableFallbackId(
+        "scene-track",
+        [sceneName, title, sourceType, sourceId],
+        fallbackIndex
+      )
+    ),
+    title,
+    url: normalizeText(value.url),
+    sourceType,
+    mediaType: normalizeMediaType(value),
+    sourceId,
+    order: normalizePositiveInt(value.order, fallbackIndex),
+    volume: clamp(toNumber2(value.volume, 100), 0, 100),
+    loop: Boolean(value.loop),
+    startDelayMs: normalizePositiveInt(value.startDelayMs ?? value.startDelay, 0),
+    startOffsetSec: Math.max(
+      0,
+      toNumber2(value.startOffsetSec ?? value.startSeconds ?? value.startOffset, 0)
+    ),
+    fadeInMs: normalizePositiveInt(value.fadeInMs, DEFAULT_GLOBAL_FADE_MS),
+    fadeOutMs: normalizePositiveInt(value.fadeOutMs, DEFAULT_GLOBAL_FADE_MS)
+  };
+}
+function ensureScene(value, fallbackIndex = 0) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const sceneName = normalizeText(value.name, "Untitled scene");
+  const rawTracks = Array.isArray(value.tracks) ? value.tracks : Array.isArray(value.layers) ? value.layers : [];
+  const tracks = rawTracks.map((track, index) => ensureSceneTrack(track, index, sceneName)).filter(Boolean).sort((left, right) => left.order - right.order || left.title.localeCompare(right.title)).slice(0, MAX_TRACKS_PER_SCENE).map((track, index) => ({
+    ...track,
+    order: index
+  }));
+  return {
+    id: normalizeText(
+      value.id,
+      buildStableFallbackId("scene", [sceneName], fallbackIndex)
+    ),
+    name: sceneName,
+    color: normalizeText(value.color, DEFAULT_SCENE_COLOR),
+    order: normalizePositiveInt(value.order, fallbackIndex),
+    volume: clamp(toNumber2(value.volume, 100), 0, 100),
+    loop: Boolean(value.loop),
+    updatedAt: normalizePositiveInt(value.updatedAt, 0),
+    tracks
+  };
+}
+function ensureActiveTrack(value, fallbackIndex = 0) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const sourceId = normalizeText(value.sourceId);
+  if (!sourceId) {
+    return null;
+  }
+  return {
+    trackId: normalizeText(
+      value.trackId ?? value.id,
+      buildStableFallbackId(
+        "active-track",
+        [value.title, value.sourceType, sourceId],
+        fallbackIndex
+      )
+    ),
+    title: normalizeText(value.title, `Track ${sourceId}`),
+    sourceType: normalizeSceneSourceType(value),
+    mediaType: normalizeMediaType(value),
+    sourceId,
+    volume: clamp(toNumber2(value.volume, 100), 0, 100),
+    loop: Boolean(value.loop),
+    startDelayMs: normalizePositiveInt(value.startDelayMs, 0),
+    startOffsetSec: Math.max(0, toNumber2(value.startOffsetSec, 0)),
+    fadeInMs: normalizePositiveInt(value.fadeInMs, DEFAULT_GLOBAL_FADE_MS),
+    fadeOutMs: normalizePositiveInt(value.fadeOutMs, DEFAULT_GLOBAL_FADE_MS),
+    effectiveOrder: normalizePositiveInt(value.effectiveOrder ?? value.order, fallbackIndex),
+    activationScenePositionMs: normalizePositiveInt(value.activationScenePositionMs, 0),
+    status: normalizeTrackStatus(value.status),
+    nextStatus: normalizeOptionalStatus(value.nextStatus),
+    fadeStartedAt: normalizePositiveInt(value.fadeStartedAt, 0),
+    fadeEndsAt: normalizePositiveInt(value.fadeEndsAt, 0)
+  };
+}
+function ensureActiveScene(value, fallbackIndex = 0) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const sceneName = normalizeText(value.name, "Active scene");
+  return {
+    sceneId: normalizeText(
+      value.sceneId ?? value.id,
+      buildStableFallbackId("active-scene", [sceneName], fallbackIndex)
+    ),
+    name: sceneName,
+    color: normalizeText(value.color, DEFAULT_SCENE_COLOR),
+    order: normalizePositiveInt(value.order, fallbackIndex),
+    sceneVolume: clamp(toNumber2(value.sceneVolume ?? value.volume, 100), 0, 100),
+    loop: Boolean(value.loop),
+    status: normalizeSceneStatus(value.status),
+    nextStatus: normalizeOptionalStatus(value.nextStatus),
+    positionMs: normalizePositiveInt(value.positionMs, 0),
+    startedAt: normalizePositiveInt(value.startedAt, 0),
+    pausedAt: normalizePositiveInt(value.pausedAt, 0),
+    fadeStartedAt: normalizePositiveInt(value.fadeStartedAt, 0),
+    fadeEndsAt: normalizePositiveInt(value.fadeEndsAt, 0),
+    tracks: Array.isArray(value.tracks) ? value.tracks.map((track, index) => ensureActiveTrack(track, index)).filter(Boolean).sort((left, right) => left.effectiveOrder - right.effectiveOrder || left.title.localeCompare(right.title)).slice(0, MAX_TRACKS_PER_SCENE) : []
+  };
+}
+function ensureLibraryPack(value) {
+  if (!value || typeof value !== "object") {
+    return createEmptyLibraryPack(0);
+  }
+  const scenes = Array.isArray(value.scenes) ? value.scenes.map((scene, index) => ensureScene(scene, index)).filter(Boolean).sort((left, right) => left.order - right.order || left.name.localeCompare(right.name)).map((scene, index) => ({
+    ...scene,
+    order: index
+  })) : [];
+  return {
+    version: LIBRARY_PACK_VERSION,
+    exportedAt: normalizePositiveInt(value.exportedAt, 0),
+    scenes
+  };
+}
+function ensureRoomRuntime(value) {
+  if (!value || typeof value !== "object") {
+    return createEmptyRoomRuntime(0);
+  }
+  const activeScenes = Array.isArray(value.activeScenes) ? value.activeScenes.map((scene, index) => ensureActiveScene(scene, index)).filter(Boolean).slice(0, MAX_ACTIVE_SCENES) : [];
+  return {
+    version: ROOM_RUNTIME_VERSION,
+    updatedAt: normalizePositiveInt(value.updatedAt, 0),
+    transport: {
+      status: normalizeTransportStatus(value.transport?.status),
+      launchMode: normalizeLaunchMode(value.transport?.launchMode),
+      masterVolume: clamp(toNumber2(value.transport?.masterVolume, 85), 0, 100),
+      globalFadeMs: normalizePositiveInt(value.transport?.globalFadeMs, DEFAULT_GLOBAL_FADE_MS) || DEFAULT_GLOBAL_FADE_MS
+    },
+    activeScenes
+  };
+}
+
+// src/extension/scene-runtime.js
+function cloneRuntime(runtime) {
+  return deepClone(ensureRoomRuntime(runtime));
+}
+function cloneLibrary(library) {
+  return deepClone(ensureLibraryPack(library));
+}
+function normalizeFadeMs(runtime) {
+  return Math.max(1, Number(runtime.transport?.globalFadeMs) || DEFAULT_GLOBAL_FADE_MS);
+}
+function setTransportStatus(runtime, now = safeNow()) {
+  const activeScenes = runtime.activeScenes.filter((scene) => scene.status !== SCENE_STATUS_STOPPED);
+  if (!activeScenes.length) {
+    runtime.transport.status = TRANSPORT_STOPPED;
+    runtime.updatedAt = now;
+    return runtime;
+  }
+  const anyScenePlaying = activeScenes.some((scene) => scene.status === SCENE_STATUS_PLAYING || scene.status === SCENE_STATUS_FADING_IN || scene.status === SCENE_STATUS_FADING_OUT && scene.nextStatus !== SCENE_STATUS_PAUSED);
+  runtime.transport.status = anyScenePlaying ? TRANSPORT_PLAYING : TRANSPORT_PAUSED;
+  runtime.updatedAt = now;
+  return runtime;
+}
+function findSceneOrThrow(library, sceneId) {
+  const scene = library.scenes.find((entry) => entry.id === sceneId);
+  if (!scene) {
+    throw new Error("Scene not found in library.");
+  }
+  return scene;
+}
+function findActiveScene(runtime, sceneId) {
+  return runtime.activeScenes.find((scene) => scene.sceneId === sceneId);
+}
+function computeTrackBaseStatus(track) {
+  return track.startDelayMs > 0 ? TRACK_STATUS_QUEUED : TRACK_STATUS_FADING_IN;
+}
+function createActiveTrack(sceneTrack, effectiveOrder, activationScenePositionMs, now, fadeMs, forcePaused = false) {
+  const status = forcePaused ? TRACK_STATUS_PAUSED : computeTrackBaseStatus(sceneTrack);
+  const nextStatus = forcePaused ? null : TRACK_STATUS_PLAYING;
+  return {
+    id: makeId("active-track-instance"),
+    trackId: sceneTrack.id,
+    title: sceneTrack.title,
+    sourceType: sceneTrack.sourceType,
+    mediaType: sceneTrack.mediaType,
+    sourceId: sceneTrack.sourceId,
+    volume: sceneTrack.volume,
+    loop: sceneTrack.loop,
+    startDelayMs: sceneTrack.startDelayMs,
+    startOffsetSec: sceneTrack.startOffsetSec,
+    fadeInMs: sceneTrack.fadeInMs,
+    fadeOutMs: sceneTrack.fadeOutMs,
+    effectiveOrder,
+    activationScenePositionMs,
+    status,
+    nextStatus,
+    fadeStartedAt: status === TRACK_STATUS_FADING_IN ? now : 0,
+    fadeEndsAt: status === TRACK_STATUS_FADING_IN ? now + Math.max(1, sceneTrack.fadeInMs || fadeMs) : 0
+  };
+}
+function createActiveScene(scene, now, fadeMs) {
+  return {
+    sceneId: scene.id,
+    name: scene.name,
+    color: scene.color,
+    order: scene.order,
+    sceneVolume: scene.volume,
+    loop: scene.loop,
+    status: SCENE_STATUS_FADING_IN,
+    nextStatus: SCENE_STATUS_PLAYING,
+    positionMs: 0,
+    startedAt: now,
+    pausedAt: 0,
+    fadeStartedAt: now,
+    fadeEndsAt: now + fadeMs,
+    tracks: scene.tracks.map((track, index) => createActiveTrack(track, index, 0, now, fadeMs))
+  };
+}
+function freezeScenePosition(scene, now) {
+  scene.positionMs = computeSceneTimelinePosition(scene, now);
+  scene.startedAt = 0;
+  scene.pausedAt = now;
+}
+function markSceneTransition(scene, status, nextStatus, now, fadeMs) {
+  scene.status = status;
+  scene.nextStatus = nextStatus;
+  scene.fadeStartedAt = now;
+  scene.fadeEndsAt = now + Math.max(1, fadeMs);
+}
+function markTracksForSceneTransition(scene, status, nextStatus, now, fadeMs) {
+  for (const track of scene.tracks) {
+    if (status === TRACK_STATUS_STOPPED) {
+      track.status = TRACK_STATUS_STOPPED;
+      track.nextStatus = null;
+      track.fadeStartedAt = 0;
+      track.fadeEndsAt = 0;
+      continue;
+    }
+    track.status = status;
+    track.nextStatus = nextStatus;
+    track.fadeStartedAt = now;
+    track.fadeEndsAt = now + Math.max(1, fadeMs);
+  }
+}
+function normalizeTrackOrder(tracks) {
+  return tracks.slice().sort((left, right) => left.effectiveOrder - right.effectiveOrder || left.title.localeCompare(right.title)).map((track, index) => ({
+    ...track,
+    effectiveOrder: index
+  }));
+}
+function computeSceneTimelinePosition(sceneRuntime, now = safeNow()) {
+  const scene = sceneRuntime || {};
+  const basePosition = Math.max(0, Number(scene.positionMs) || 0);
+  const startedAt = Math.max(0, Number(scene.startedAt) || 0);
+  if (!startedAt) {
+    return basePosition;
+  }
+  return Math.max(0, basePosition + (Math.max(now, startedAt) - startedAt));
+}
+function isTrackReadyToStart(sceneRuntime, trackRuntime, now = safeNow()) {
+  const scenePositionMs = computeSceneTimelinePosition(sceneRuntime, now);
+  const boundaryMs = Math.max(0, Number(trackRuntime?.activationScenePositionMs) || 0) + Math.max(0, Number(trackRuntime?.startDelayMs) || 0);
+  return scenePositionMs >= boundaryMs;
+}
+function finalizeRuntimeTransitions(runtime, now = safeNow()) {
+  const nextRuntime = cloneRuntime(runtime);
+  nextRuntime.activeScenes = nextRuntime.activeScenes.flatMap((scene) => {
+    if (scene.fadeEndsAt && scene.fadeEndsAt <= now && scene.nextStatus) {
+      scene.status = scene.nextStatus;
+      scene.nextStatus = null;
+      scene.fadeStartedAt = 0;
+      scene.fadeEndsAt = 0;
+    }
+    scene.tracks = scene.tracks.flatMap((track) => {
+      if (track.fadeEndsAt && track.fadeEndsAt <= now && track.nextStatus) {
+        track.status = track.nextStatus;
+        track.nextStatus = null;
+        track.fadeStartedAt = 0;
+        track.fadeEndsAt = 0;
+      }
+      return track.status === TRACK_STATUS_STOPPED ? [] : [track];
+    });
+    if (scene.status === SCENE_STATUS_STOPPED) {
+      return [];
+    }
+    return [scene];
+  });
+  return setTransportStatus(nextRuntime, now);
+}
+function setMasterVolume(runtime, volume, now = safeNow()) {
+  const nextRuntime = cloneRuntime(runtime);
+  nextRuntime.transport.masterVolume = Math.max(0, Math.min(100, Number(volume) || 0));
+  return setTransportStatus(nextRuntime, now);
+}
+function launchScene({
+  library,
+  runtime,
+  sceneId,
+  mode = null,
+  now = safeNow()
+} = {}) {
+  const nextLibrary = ensureLibraryPack(library);
+  const nextRuntime = finalizeRuntimeTransitions(runtime, now);
+  const scene = findSceneOrThrow(nextLibrary, sceneId);
+  const launchMode = mode || nextRuntime.transport.launchMode || LAUNCH_MODE_ADD;
+  const fadeMs = normalizeFadeMs(nextRuntime);
+  if (findActiveScene(nextRuntime, sceneId)) {
+    throw new Error("This scene is already active.");
+  }
+  if (launchMode === LAUNCH_MODE_ADD && nextRuntime.activeScenes.length >= MAX_ACTIVE_SCENES) {
+    throw new Error(`Only ${MAX_ACTIVE_SCENES} scenes can be active at the same time.`);
+  }
+  if (launchMode === LAUNCH_MODE_REPLACE) {
+    for (const activeScene of nextRuntime.activeScenes) {
+      freezeScenePosition(activeScene, now);
+      markSceneTransition(activeScene, SCENE_STATUS_FADING_OUT, SCENE_STATUS_STOPPED, now, fadeMs);
+      markTracksForSceneTransition(activeScene, TRACK_STATUS_FADING_OUT, TRACK_STATUS_STOPPED, now, fadeMs);
+    }
+  }
+  nextRuntime.activeScenes.push(createActiveScene(scene, now, fadeMs));
+  return setTransportStatus(nextRuntime, now);
+}
+function pauseAllScenes(runtime, now = safeNow()) {
+  const nextRuntime = cloneRuntime(runtime);
+  const fadeMs = normalizeFadeMs(nextRuntime);
+  for (const scene of nextRuntime.activeScenes) {
+    freezeScenePosition(scene, now);
+    markSceneTransition(scene, SCENE_STATUS_FADING_OUT, SCENE_STATUS_PAUSED, now, fadeMs);
+    markTracksForSceneTransition(scene, TRACK_STATUS_FADING_OUT, TRACK_STATUS_PAUSED, now, fadeMs);
+  }
+  return setTransportStatus(nextRuntime, now);
+}
+function resumeAllScenes(runtime, now = safeNow()) {
+  const nextRuntime = cloneRuntime(runtime);
+  const fadeMs = normalizeFadeMs(nextRuntime);
+  for (const scene of nextRuntime.activeScenes) {
+    scene.startedAt = now;
+    scene.pausedAt = 0;
+    markSceneTransition(scene, SCENE_STATUS_FADING_IN, SCENE_STATUS_PLAYING, now, fadeMs);
+    for (const track of scene.tracks) {
+      const ready = isTrackReadyToStart(scene, track, now);
+      track.status = ready ? TRACK_STATUS_FADING_IN : TRACK_STATUS_QUEUED;
+      track.nextStatus = TRACK_STATUS_PLAYING;
+      track.fadeStartedAt = ready ? now : 0;
+      track.fadeEndsAt = ready ? now + Math.max(1, track.fadeInMs || fadeMs) : 0;
+    }
+  }
+  return setTransportStatus(nextRuntime, now);
+}
+function stopAllScenes(runtime, now = safeNow()) {
+  const nextRuntime = cloneRuntime(runtime);
+  const fadeMs = normalizeFadeMs(nextRuntime);
+  for (const scene of nextRuntime.activeScenes) {
+    freezeScenePosition(scene, now);
+    markSceneTransition(scene, SCENE_STATUS_FADING_OUT, SCENE_STATUS_STOPPED, now, fadeMs);
+    markTracksForSceneTransition(scene, TRACK_STATUS_FADING_OUT, TRACK_STATUS_STOPPED, now, fadeMs);
+  }
+  return setTransportStatus(nextRuntime, now);
+}
+function deleteSceneFromLibrary({
+  library,
+  runtime,
+  sceneId,
+  now = safeNow()
+} = {}) {
+  const nextLibrary = cloneLibrary(library);
+  const nextRuntime = cloneRuntime(runtime);
+  const nextScenes = nextLibrary.scenes.filter((scene) => scene.id !== sceneId);
+  if (nextScenes.length === nextLibrary.scenes.length) {
+    return {
+      library: nextLibrary,
+      runtime: setTransportStatus(nextRuntime, now)
+    };
+  }
+  nextLibrary.scenes = nextScenes.map((scene, index) => ({
+    ...scene,
+    order: index
+  }));
+  nextLibrary.exportedAt = now;
+  nextRuntime.activeScenes = nextRuntime.activeScenes.filter((scene) => scene.sceneId !== sceneId);
+  return {
+    library: nextLibrary,
+    runtime: setTransportStatus(nextRuntime, now)
+  };
+}
+function addTrackToScene({
+  library,
+  runtime,
+  sceneId,
+  track,
+  now = safeNow()
+} = {}) {
+  const nextLibrary = cloneLibrary(library);
+  const nextRuntime = cloneRuntime(runtime);
+  const scene = findSceneOrThrow(nextLibrary, sceneId);
+  if (scene.tracks.length >= MAX_TRACKS_PER_SCENE) {
+    throw new Error(`A scene can contain at most ${MAX_TRACKS_PER_SCENE} tracks.`);
+  }
+  const nextTrack = ensureSceneTrack({
+    ...track,
+    order: scene.tracks.length
+  }, scene.tracks.length, scene.name);
+  if (!nextTrack) {
+    throw new Error("Track is missing a valid source ID.");
+  }
+  scene.tracks.push(nextTrack);
+  scene.updatedAt = now;
+  const activeScene = findActiveScene(nextRuntime, sceneId);
+  if (activeScene) {
+    const scenePositionMs = computeSceneTimelinePosition(activeScene, now);
+    const fadeMs = normalizeFadeMs(nextRuntime);
+    const scenePaused = activeScene.status === SCENE_STATUS_PAUSED || activeScene.status === SCENE_STATUS_FADING_OUT && activeScene.nextStatus === SCENE_STATUS_PAUSED;
+    activeScene.tracks.push(
+      createActiveTrack(nextTrack, activeScene.tracks.length, scenePositionMs, now, fadeMs, scenePaused)
+    );
+    activeScene.tracks = normalizeTrackOrder(activeScene.tracks);
+  }
+  return {
+    library: nextLibrary,
+    runtime: setTransportStatus(nextRuntime, now)
+  };
+}
+function updateTrackSettings({
+  library,
+  runtime,
+  sceneId,
+  trackId,
+  patch = {},
+  now = safeNow()
+} = {}) {
+  const nextLibrary = cloneLibrary(library);
+  const nextRuntime = cloneRuntime(runtime);
+  const scene = findSceneOrThrow(nextLibrary, sceneId);
+  const track = scene.tracks.find((entry) => entry.id === trackId);
+  if (!track) {
+    throw new Error("Track not found in scene.");
+  }
+  if (patch.title != null) {
+    track.title = String(patch.title).trim() || track.title;
+  }
+  if (patch.url != null) {
+    track.url = String(patch.url).trim() || track.url;
+  }
+  if (patch.volume != null) {
+    track.volume = Math.max(0, Math.min(100, Number(patch.volume) || 0));
+  }
+  if (patch.loop != null) {
+    track.loop = Boolean(patch.loop);
+  }
+  if (patch.startDelayMs != null) {
+    track.startDelayMs = Math.max(0, Math.round(Number(patch.startDelayMs) || 0));
+  }
+  if (patch.startOffsetSec != null) {
+    track.startOffsetSec = Math.max(0, Number(patch.startOffsetSec) || 0);
+  }
+  if (patch.fadeInMs != null) {
+    track.fadeInMs = Math.max(1, Math.round(Number(patch.fadeInMs) || 0));
+  }
+  if (patch.fadeOutMs != null) {
+    track.fadeOutMs = Math.max(1, Math.round(Number(patch.fadeOutMs) || 0));
+  }
+  scene.updatedAt = now;
+  const activeScene = findActiveScene(nextRuntime, sceneId);
+  const activeTrack = activeScene?.tracks.find((entry) => entry.trackId === trackId);
+  if (activeTrack) {
+    activeTrack.title = track.title;
+    activeTrack.volume = track.volume;
+    activeTrack.loop = track.loop;
+    activeTrack.mediaType = track.mediaType;
+    activeTrack.startDelayMs = track.startDelayMs;
+    activeTrack.startOffsetSec = track.startOffsetSec;
+    activeTrack.fadeInMs = track.fadeInMs;
+    activeTrack.fadeOutMs = track.fadeOutMs;
+  }
+  return {
+    library: nextLibrary,
+    runtime: setTransportStatus(nextRuntime, now)
+  };
+}
+function removeTrackFromScene({
+  library,
+  runtime,
+  sceneId,
+  trackId,
+  now = safeNow()
+} = {}) {
+  const nextLibrary = cloneLibrary(library);
+  const nextRuntime = cloneRuntime(runtime);
+  const scene = findSceneOrThrow(nextLibrary, sceneId);
+  const removedTrack = scene.tracks.find((entry) => entry.id === trackId);
+  if (!removedTrack) {
+    return {
+      library: nextLibrary,
+      runtime: setTransportStatus(nextRuntime, now)
+    };
+  }
+  scene.tracks = scene.tracks.filter((entry) => entry.id !== trackId).map((entry, index) => ({
+    ...entry,
+    order: index
+  }));
+  scene.updatedAt = now;
+  const activeScene = findActiveScene(nextRuntime, sceneId);
+  if (activeScene) {
+    const activeTrack = activeScene.tracks.find((entry) => entry.trackId === trackId);
+    if (activeTrack) {
+      activeTrack.status = TRACK_STATUS_FADING_OUT;
+      activeTrack.nextStatus = TRACK_STATUS_STOPPED;
+      activeTrack.fadeStartedAt = now;
+      activeTrack.fadeEndsAt = now + Math.max(1, activeTrack.fadeOutMs || normalizeFadeMs(nextRuntime));
+    }
+    activeScene.tracks = normalizeTrackOrder(activeScene.tracks);
+  }
+  return {
+    library: nextLibrary,
+    runtime: setTransportStatus(nextRuntime, now)
+  };
+}
+
+// src/extension/scene-playback.js
+function buildPlaybackSlotId(sceneId, trackId) {
+  return `${sceneId}::${trackId}`;
+}
+
+// src/extension/scene-compat.js
+var LIVE_SCENE_ID = "scene-live-mix";
+var LIVE_SCENE_NAME = "Live mix";
+function clone(value) {
+  if (typeof structuredClone === "function") {
+    return structuredClone(value);
+  }
+  return JSON.parse(JSON.stringify(value));
+}
+function mapOrigin(sourceType) {
+  return sourceType === "youtube_music" ? "youtube-music" : "youtube";
+}
+function mapMediaType(track) {
+  return track?.mediaType === "playlist" ? "playlist" : "video";
+}
+function mapLegacyTrackStatus(scene, track) {
+  const sceneStatus = scene?.status || TRANSPORT_STOPPED;
+  const trackStatus = track?.status || TRANSPORT_STOPPED;
+  if (sceneStatus === "paused" || trackStatus === "paused") {
+    return TRANSPORT_PAUSED;
+  }
+  if (trackStatus === "queued" || trackStatus === "fading_in" || trackStatus === "playing") {
+    return TRANSPORT_PLAYING;
+  }
+  if (sceneStatus === "fading_in" || sceneStatus === "playing") {
+    return TRANSPORT_PLAYING;
+  }
+  if (sceneStatus === "fading_out" && scene?.nextStatus === "paused") {
+    return TRANSPORT_PAUSED;
+  }
+  return TRANSPORT_STOPPED;
+}
+function toLegacyLayer(track, scene, fallbackIndex = 0) {
+  return {
+    id: buildPlaybackSlotId(scene.sceneId || scene.id, track.trackId || track.id),
+    sceneId: scene.sceneId || scene.id,
+    trackId: track.trackId || track.id,
+    title: track.title,
+    url: track.url || "",
+    sourceType: mapMediaType(track),
+    sourceId: track.sourceId,
+    origin: mapOrigin(track.sourceType),
+    volume: track.volume,
+    loop: track.loop,
+    startSeconds: track.startOffsetSec || 0,
+    order: Number.isFinite(track.effectiveOrder) ? track.effectiveOrder : fallbackIndex,
+    runtime: {
+      status: mapLegacyTrackStatus(scene, track),
+      pauseOffsetSec: Math.max(0, Number(track.startOffsetSec) || 0),
+      playingSince: Number.isFinite(scene.startedAt) && scene.startedAt > 0 ? scene.startedAt : null,
+      playlistIndex: 0,
+      playlistVideoId: null,
+      cycle: 0,
+      lastSyncAt: Number.isFinite(scene.startedAt) ? scene.startedAt : 0
+    }
+  };
+}
+function ensureLiveSceneInLibrary(library, now = safeNow()) {
+  const normalized = clone(ensureLibraryPack(library));
+  if (normalized.scenes.some((scene) => scene.id === LIVE_SCENE_ID)) {
+    return normalized;
+  }
+  const liveScene = ensureScene({
+    id: LIVE_SCENE_ID,
+    name: LIVE_SCENE_NAME,
+    color: DEFAULT_SCENE_COLOR,
+    order: -1,
+    volume: 100,
+    loop: false,
+    updatedAt: now,
+    tracks: []
+  }, 0);
+  normalized.scenes.unshift(liveScene);
+  normalized.scenes = normalized.scenes.map((scene, index) => ({
+    ...scene,
+    order: scene.id === LIVE_SCENE_ID ? -1 : index - 1
+  }));
+  normalized.exportedAt = now;
+  return normalized;
+}
+function getLiveScene(library) {
+  return ensureLiveSceneInLibrary(library).scenes.find((scene) => scene.id === LIVE_SCENE_ID) || null;
+}
+function stripLiveSceneFromLibrary(library) {
+  const normalized = ensureLiveSceneInLibrary(library);
+  return {
+    ...normalized,
+    scenes: normalized.scenes.filter((scene) => scene.id !== LIVE_SCENE_ID).map((scene, index) => ({
+      ...scene,
+      order: index
+    }))
+  };
+}
+function createSceneTrackFromParsedTrack(track, now = safeNow()) {
+  return ensureSceneTrack({
+    id: buildStableFallbackId(
+      "scene-track",
+      [track.title, track.origin, track.sourceType, track.sourceId, now],
+      0
+    ),
+    title: track.title,
+    url: track.url,
+    sourceType: track.origin === "youtube-music" ? "youtube_music" : "youtube",
+    mediaType: track.sourceType === "playlist" ? "playlist" : "video",
+    sourceId: track.sourceId,
+    volume: track.volume ?? 100,
+    loop: Boolean(track.loop),
+    startDelayMs: track.startDelayMs ?? 0,
+    startOffsetSec: track.startOffsetSec ?? track.startSeconds ?? 0,
+    fadeInMs: track.fadeInMs,
+    fadeOutMs: track.fadeOutMs
+  }, 0, LIVE_SCENE_NAME);
+}
+function buildLegacyLibraryView(library) {
+  const normalized = stripLiveSceneFromLibrary(library);
+  return {
+    version: 1,
+    updatedAt: normalized.exportedAt,
+    scenes: normalized.scenes.map((scene) => ({
+      id: scene.id,
+      name: scene.name,
+      updatedAt: scene.updatedAt,
+      layers: scene.tracks.map((track, index) => ({
+        id: track.id,
+        title: track.title,
+        url: track.url,
+        sourceType: mapMediaType(track),
+        sourceId: track.sourceId,
+        origin: mapOrigin(track.sourceType),
+        volume: track.volume,
+        loop: track.loop,
+        startSeconds: track.startOffsetSec,
+        order: Number.isFinite(track.order) ? track.order : index
+      }))
+    }))
+  };
+}
+function buildLegacyRoomStateView(runtime, library) {
+  const normalizedRuntime = ensureRoomRuntime(runtime);
+  const normalizedLibrary = ensureLiveSceneInLibrary(library);
+  const activeScenes = normalizedRuntime.activeScenes.slice().sort((left, right) => left.order - right.order || left.name.localeCompare(right.name));
+  let layers = [];
+  let activeScene = null;
+  if (activeScenes.length) {
+    layers = activeScenes.flatMap((scene) => scene.tracks.slice().sort((left, right) => left.effectiveOrder - right.effectiveOrder || left.title.localeCompare(right.title)).map((track, index) => toLegacyLayer(track, scene, index)));
+    activeScene = activeScenes.length === 1 ? {
+      id: activeScenes[0].sceneId,
+      name: activeScenes[0].name
+    } : {
+      id: "active-scenes",
+      name: `${activeScenes.length} scenes active`
+    };
+  } else {
+    const liveScene = getLiveScene(normalizedLibrary);
+    if (liveScene) {
+      layers = liveScene.tracks.map((track, index) => toLegacyLayer(
+        {
+          ...track,
+          trackId: track.id,
+          effectiveOrder: track.order,
+          status: TRACK_STATUS_STOPPED
+        },
+        {
+          sceneId: liveScene.id,
+          name: liveScene.name,
+          startedAt: 0,
+          status: TRANSPORT_STOPPED
+        },
+        index
+      ));
+      activeScene = {
+        id: liveScene.id,
+        name: liveScene.name
+      };
+    }
+  }
+  return {
+    version: 1,
+    revision: normalizedRuntime.updatedAt || 0,
+    activeScene,
+    transport: {
+      status: normalizedRuntime.transport.status,
+      masterVolume: normalizedRuntime.transport.masterVolume,
+      changedAt: normalizedRuntime.updatedAt || 0
+    },
+    layers
+  };
+}
+function findTrackReference(runtime, library, slotId) {
+  const normalizedRuntime = ensureRoomRuntime(runtime);
+  for (const scene of normalizedRuntime.activeScenes) {
+    for (const track of scene.tracks) {
+      if (buildPlaybackSlotId(scene.sceneId, track.trackId) === slotId) {
+        return {
+          sceneId: scene.sceneId,
+          trackId: track.trackId,
+          fromRuntime: true
+        };
+      }
+    }
+  }
+  const liveScene = getLiveScene(library);
+  for (const track of liveScene?.tracks || []) {
+    if (buildPlaybackSlotId(LIVE_SCENE_ID, track.id) === slotId) {
+      return {
+        sceneId: LIVE_SCENE_ID,
+        trackId: track.id,
+        fromRuntime: false
+      };
+    }
+  }
+  return null;
+}
+function collectCurrentMixTracks(runtime, library) {
+  const normalizedRuntime = ensureRoomRuntime(runtime);
+  if (!normalizedRuntime.activeScenes.length) {
+    return clone(getLiveScene(library)?.tracks || []);
+  }
+  return normalizedRuntime.activeScenes.slice().sort((left, right) => left.order - right.order || left.name.localeCompare(right.name)).flatMap((scene) => scene.tracks.slice().sort((left, right) => left.effectiveOrder - right.effectiveOrder || left.title.localeCompare(right.title)).map((track, index) => ensureSceneTrack({
+    id: buildStableFallbackId("scene-track", [scene.name, track.title, track.sourceId], index),
+    title: track.title,
+    url: track.url || "",
+    sourceType: track.sourceType,
+    mediaType: track.mediaType,
+    sourceId: track.sourceId,
+    order: index,
+    volume: track.volume,
+    loop: track.loop,
+    startDelayMs: track.startDelayMs,
+    startOffsetSec: track.startOffsetSec,
+    fadeInMs: track.fadeInMs,
+    fadeOutMs: track.fadeOutMs
+  }, index, scene.name))).filter(Boolean);
+}
+function upsertLibraryScene({
+  library,
+  sceneId = null,
+  name,
+  color = DEFAULT_SCENE_COLOR,
+  volume = 100,
+  loop = false,
+  tracks = [],
+  now = safeNow()
+} = {}) {
+  const normalized = ensureLiveSceneInLibrary(library);
+  const nextScene = ensureScene({
+    id: sceneId || buildStableFallbackId("scene", [name, now], normalized.scenes.length),
+    name,
+    color,
+    volume,
+    loop,
+    updatedAt: now,
+    tracks
+  }, normalized.scenes.length);
+  if (!nextScene) {
+    throw new Error("Could not save scene.");
+  }
+  const filteredScenes = normalized.scenes.filter((scene) => scene.id !== nextScene.id);
+  filteredScenes.push(nextScene);
+  const liveScene = filteredScenes.find((scene) => scene.id === LIVE_SCENE_ID) || null;
+  const regularScenes = filteredScenes.filter((scene) => scene.id !== LIVE_SCENE_ID).sort((left, right) => left.order - right.order || left.name.localeCompare(right.name)).map((scene, index) => ({
+    ...scene,
+    order: index
+  }));
+  return {
+    ...normalized,
+    exportedAt: now,
+    scenes: liveScene ? [liveScene, ...regularScenes] : regularScenes
+  };
+}
+
 // src/extension/main.js
 var root = document.getElementById("app");
+var LIBRARY_STORAGE_KEY = `${EXTENSION_ID}/library-pack`;
+var initialLibraryPack = ensureLiveSceneInLibrary(createEmptyLibraryPack(0), 0);
+var initialRuntime = createEmptyRoomRuntime(0);
 var state = {
   role: "PLAYER",
-  roomState: createEmptyRoomState(),
-  library: createEmptySceneLibrary(),
+  runtime: initialRuntime,
+  libraryPack: initialLibraryPack,
+  roomState: buildLegacyRoomStateView(initialRuntime, initialLibraryPack),
+  library: buildLegacyLibraryView(initialLibraryPack),
   loading: true,
   busy: false,
   draft: {
@@ -3877,10 +4717,41 @@ function clearError() {
 function setNotices(messages = []) {
   state.notices = Array.isArray(messages) ? messages.filter(Boolean).slice(0, 4) : [];
 }
+function syncDerivedState() {
+  state.roomState = buildLegacyRoomStateView(state.runtime, state.libraryPack);
+  state.library = buildLegacyLibraryView(state.libraryPack);
+}
+function loadStoredLibraryPack(roomLibraryMetadata = null) {
+  try {
+    const raw = localStorage.getItem(LIBRARY_STORAGE_KEY);
+    if (raw) {
+      return ensureLiveSceneInLibrary(JSON.parse(raw));
+    }
+  } catch {
+  }
+  const migrated = ensureLibraryPack(roomLibraryMetadata);
+  if (migrated.scenes.length) {
+    const nextLibrary = ensureLiveSceneInLibrary(migrated);
+    try {
+      localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(nextLibrary));
+    } catch {
+    }
+    return nextLibrary;
+  }
+  return ensureLiveSceneInLibrary(createEmptyLibraryPack());
+}
+function persistLibraryPack(nextLibrary) {
+  state.libraryPack = ensureLiveSceneInLibrary(nextLibrary);
+  try {
+    localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(state.libraryPack));
+  } catch {
+  }
+}
 async function refreshRoomData() {
   const metadata = await lib_default.room.getMetadata();
-  state.roomState = ensureRoomState(metadata[ROOM_STATE_KEY]);
-  state.library = ensureSceneLibrary(metadata[SCENE_LIBRARY_KEY]);
+  state.runtime = ensureRoomRuntime(metadata[ROOM_STATE_KEY]);
+  state.libraryPack = loadStoredLibraryPack(metadata[SCENE_LIBRARY_KEY]);
+  syncDerivedState();
 }
 async function refreshLocalClientStatus() {
   const metadata = await lib_default.player.getMetadata();
@@ -3895,6 +4766,28 @@ async function refreshLocalClientStatus() {
     );
   }
 }
+async function pushRuntime(nextRuntime) {
+  const normalized = ensureRoomRuntime(nextRuntime);
+  await lib_default.room.setMetadata({
+    [ROOM_STATE_KEY]: normalized
+  });
+  await lib_default.broadcast.sendMessage(
+    BROADCAST_CHANNEL,
+    { roomState: normalized },
+    { destination: "ALL" }
+  );
+  state.runtime = normalized;
+  syncDerivedState();
+}
+async function mutateRuntime(mutator) {
+  const metadata = await lib_default.room.getMetadata();
+  const current2 = ensureRoomRuntime(metadata[ROOM_STATE_KEY]);
+  const nextRuntime = mutator(current2);
+  if (!nextRuntime) {
+    return;
+  }
+  await pushRuntime(nextRuntime);
+}
 function syncLocalStatusFromPlayer(player) {
   const nextStatus = player?.metadata?.[CLIENT_STATUS_KEY];
   if (nextStatus) {
@@ -3906,115 +4799,39 @@ function syncLocalStatusFromPlayer(player) {
     );
   }
 }
-async function pushRoomState(nextState) {
-  const normalized = ensureRoomState(nextState);
-  await lib_default.room.setMetadata({
-    [ROOM_STATE_KEY]: normalized
-  });
-  await lib_default.broadcast.sendMessage(
-    BROADCAST_CHANNEL,
-    { roomState: normalized },
-    { destination: "ALL" }
-  );
-  state.roomState = normalized;
-}
-async function mutateRoomState(mutator) {
-  const metadata = await lib_default.room.getMetadata();
-  const current2 = ensureRoomState(metadata[ROOM_STATE_KEY]);
-  const draft = deepClone(current2);
-  const changed = mutator(draft, current2);
-  if (changed === false) {
-    return;
-  }
-  draft.revision = current2.revision + 1;
-  await pushRoomState(draft);
-}
-async function pushSceneLibrary(nextLibrary) {
-  const normalized = ensureSceneLibrary(nextLibrary);
-  await lib_default.room.setMetadata({
-    [SCENE_LIBRARY_KEY]: normalized
-  });
-  state.library = normalized;
-}
-async function mutateSceneLibrary(mutator) {
-  const metadata = await lib_default.room.getMetadata();
-  const current2 = ensureSceneLibrary(metadata[SCENE_LIBRARY_KEY]);
-  const draft = deepClone(current2);
-  const changed = mutator(draft, current2);
-  if (changed === false) {
-    return;
-  }
-  draft.updatedAt = safeNow();
-  await pushSceneLibrary(draft);
-}
-function buildPlayStateFromCurrent(currentState) {
-  const now = safeNow();
-  const startAt = now + START_LEAD_MS;
-  const next = deepClone(currentState);
-  next.transport.status = TRANSPORT_PLAYING;
-  next.transport.changedAt = startAt;
-  for (const layer of next.layers) {
-    const currentPosition = currentState.transport.status === TRANSPORT_PLAYING ? computeLayerPosition(layer, now) : layer.runtime.status === TRANSPORT_STOPPED ? layer.startSeconds : layer.runtime.pauseOffsetSec;
-    layer.runtime.status = TRANSPORT_PLAYING;
-    layer.runtime.pauseOffsetSec = currentPosition;
-    layer.runtime.playingSince = startAt;
-    layer.runtime.lastSyncAt = now;
-  }
-  return next;
-}
-function buildPauseStateFromCurrent(currentState) {
-  const now = safeNow();
-  const next = deepClone(currentState);
-  next.transport.status = TRANSPORT_PAUSED;
-  next.transport.changedAt = now;
-  for (const layer of next.layers) {
-    layer.runtime.pauseOffsetSec = computeLayerPosition(layer, now);
-    layer.runtime.status = TRANSPORT_PAUSED;
-    layer.runtime.playingSince = null;
-    layer.runtime.lastSyncAt = now;
-  }
-  return next;
-}
-function buildStopStateFromCurrent(currentState) {
-  const now = safeNow();
-  const next = deepClone(currentState);
-  next.transport.status = TRANSPORT_STOPPED;
-  next.transport.changedAt = now;
-  for (const layer of next.layers) {
-    layer.runtime.status = TRANSPORT_STOPPED;
-    layer.runtime.pauseOffsetSec = layer.startSeconds;
-    layer.runtime.playingSince = null;
-    layer.runtime.playlistIndex = 0;
-    layer.runtime.playlistVideoId = null;
-    layer.runtime.lastSyncAt = now;
-  }
-  return next;
-}
 async function addResolvedTrack(track) {
-  await mutateRoomState((draft, current2) => {
-    const nextLayer = createLayer(track);
-    const now = safeNow();
-    if (current2.transport.status === TRANSPORT_PLAYING) {
-      nextLayer.runtime.status = TRANSPORT_PLAYING;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-      nextLayer.runtime.playingSince = now + START_LEAD_MS;
-    } else if (current2.transport.status === TRANSPORT_PAUSED) {
-      nextLayer.runtime.status = TRANSPORT_PAUSED;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-    } else {
-      nextLayer.runtime.status = TRANSPORT_STOPPED;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-    }
-    nextLayer.runtime.lastSyncAt = now;
-    draft.layers.push(nextLayer);
-    if (!draft.activeScene) {
-      draft.activeScene = {
-        id: "live-mix",
-        name: "Live mix"
-      };
-    }
-    draft.transport.changedAt = current2.transport.status === TRANSPORT_PLAYING ? now + START_LEAD_MS : now;
+  let nextLibrary = state.libraryPack;
+  if (!getLiveScene(nextLibrary)) {
+    nextLibrary = ensureLiveSceneInLibrary(nextLibrary);
+  }
+  const nextTrack = createSceneTrackFromParsedTrack(track);
+  if (!nextTrack) {
+    throw new Error("Could not turn this link into a playable scene track.");
+  }
+  const liveScene = getLiveScene(nextLibrary);
+  const currentTracks = liveScene?.tracks || [];
+  const updatedLiveScene = upsertLibraryScene({
+    library: nextLibrary,
+    sceneId: LIVE_SCENE_ID,
+    name: LIVE_SCENE_NAME,
+    tracks: [...currentTracks, nextTrack],
+    now: safeNow()
   });
+  persistLibraryPack(updatedLiveScene);
+  const activeLiveScene = state.runtime.activeScenes.find((scene) => scene.sceneId === LIVE_SCENE_ID);
+  if (activeLiveScene) {
+    const result = addTrackToScene({
+      library: state.libraryPack,
+      runtime: state.runtime,
+      sceneId: LIVE_SCENE_ID,
+      track: nextTrack,
+      now: safeNow()
+    });
+    persistLibraryPack(result.library);
+    await pushRuntime(result.runtime);
+    return;
+  }
+  syncDerivedState();
 }
 async function handleAddTrack() {
   const url = state.draft.url.trim();
@@ -4048,110 +4865,143 @@ async function handleAddTrack() {
 }
 async function handlePlayMix() {
   await unlockLocalAudio();
-  await mutateRoomState((draft, current2) => {
-    if (!draft.layers.length) {
-      return false;
+  if (state.runtime.activeScenes.length) {
+    if (state.runtime.transport.status === TRANSPORT_PLAYING) {
+      return;
     }
-    Object.assign(draft, buildPlayStateFromCurrent(current2));
-  });
-}
-async function handlePauseMix() {
-  await mutateRoomState((draft, current2) => {
-    if (!draft.layers.length) {
-      return false;
-    }
-    Object.assign(draft, buildPauseStateFromCurrent(current2));
-  });
-}
-async function handleStopMix() {
-  await mutateRoomState((draft, current2) => {
-    if (!draft.layers.length) {
-      return false;
-    }
-    Object.assign(draft, buildStopStateFromCurrent(current2));
-  });
-}
-async function handleRemoveLayer(layerId) {
-  await mutateRoomState((draft) => {
-    draft.layers = draft.layers.filter((layer) => layer.id !== layerId);
-    if (!draft.layers.length) {
-      draft.transport.status = TRANSPORT_STOPPED;
-      draft.transport.changedAt = safeNow();
-      draft.activeScene = null;
-    }
-  });
-}
-async function handleLayerVolume(layerId, volume) {
-  await mutateRoomState((draft) => {
-    const layer = draft.layers.find((item) => item.id === layerId);
-    if (!layer) {
-      return false;
-    }
-    layer.volume = clamp(Number(volume), 0, 100);
-  });
-}
-async function handleLayerLoop(layerId, loop) {
-  await mutateRoomState((draft) => {
-    const layer = draft.layers.find((item) => item.id === layerId);
-    if (!layer) {
-      return false;
-    }
-    layer.loop = Boolean(loop);
-  });
-}
-async function handleMasterVolume(volume) {
-  await mutateRoomState((draft) => {
-    draft.transport.masterVolume = clamp(Number(volume), 0, 100);
-  });
-}
-async function handlePlayScene(sceneId) {
-  const scene = state.library.scenes.find((entry) => entry.id === sceneId);
-  if (!scene) {
-    setError("Scene not found in this room.");
+    await mutateRuntime((current2) => resumeAllScenes(current2, safeNow()));
     return;
   }
-  await mutateRoomState((draft) => {
-    const now = safeNow();
-    const startAt = now + START_LEAD_MS;
-    draft.activeScene = { id: scene.id, name: scene.name };
-    draft.transport.status = TRANSPORT_PLAYING;
-    draft.transport.changedAt = startAt;
-    draft.layers = scene.layers.map((layer) => {
-      const nextLayer = createLayer(layer);
-      nextLayer.runtime.status = TRANSPORT_PLAYING;
-      nextLayer.runtime.pauseOffsetSec = nextLayer.startSeconds;
-      nextLayer.runtime.playingSince = startAt;
-      nextLayer.runtime.lastSyncAt = now;
-      return nextLayer;
-    });
+  const liveScene = getLiveScene(state.libraryPack);
+  if (!liveScene?.tracks?.length) {
+    setError("There are no tracks in the live mix yet.");
+    return;
+  }
+  await pushRuntime(launchScene({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId: LIVE_SCENE_ID,
+    mode: "replace",
+    now: safeNow()
+  }));
+}
+async function handlePauseMix() {
+  if (!state.runtime.activeScenes.length || state.runtime.transport.status !== TRANSPORT_PLAYING) {
+    return;
+  }
+  await mutateRuntime((current2) => pauseAllScenes(current2, safeNow()));
+}
+async function handleStopMix() {
+  if (!state.runtime.activeScenes.length || state.runtime.transport.status === TRANSPORT_STOPPED) {
+    return;
+  }
+  await mutateRuntime((current2) => stopAllScenes(current2, safeNow()));
+}
+async function handleRemoveLayer(layerId) {
+  const trackRef = findTrackReference(state.runtime, state.libraryPack, layerId);
+  if (!trackRef) {
+    return;
+  }
+  const result = removeTrackFromScene({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId: trackRef.sceneId,
+    trackId: trackRef.trackId,
+    now: safeNow()
   });
+  persistLibraryPack(result.library);
+  if (state.runtime.activeScenes.some((scene) => scene.sceneId === trackRef.sceneId)) {
+    await pushRuntime(result.runtime);
+    return;
+  }
+  syncDerivedState();
+  render();
+}
+async function handleLayerVolume(layerId, volume) {
+  const trackRef = findTrackReference(state.runtime, state.libraryPack, layerId);
+  if (!trackRef) {
+    return;
+  }
+  const result = updateTrackSettings({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId: trackRef.sceneId,
+    trackId: trackRef.trackId,
+    patch: {
+      volume: clamp(Number(volume), 0, 100)
+    },
+    now: safeNow()
+  });
+  persistLibraryPack(result.library);
+  if (state.runtime.activeScenes.some((scene) => scene.sceneId === trackRef.sceneId)) {
+    await pushRuntime(result.runtime);
+    return;
+  }
+  syncDerivedState();
+  render();
+}
+async function handleLayerLoop(layerId, loop) {
+  const trackRef = findTrackReference(state.runtime, state.libraryPack, layerId);
+  if (!trackRef) {
+    return;
+  }
+  const result = updateTrackSettings({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId: trackRef.sceneId,
+    trackId: trackRef.trackId,
+    patch: {
+      loop: Boolean(loop)
+    },
+    now: safeNow()
+  });
+  persistLibraryPack(result.library);
+  if (state.runtime.activeScenes.some((scene) => scene.sceneId === trackRef.sceneId)) {
+    await pushRuntime(result.runtime);
+    return;
+  }
+  syncDerivedState();
+  render();
+}
+async function handleMasterVolume(volume) {
+  await mutateRuntime((current2) => setMasterVolume(current2, clamp(Number(volume), 0, 100), safeNow()));
+}
+async function handlePlayScene(sceneId) {
+  const scene = state.libraryPack.scenes.find((entry) => entry.id === sceneId);
+  if (!scene) {
+    setError("Scene not found in this browser library.");
+    return;
+  }
+  await unlockLocalAudio();
+  await pushRuntime(launchScene({
+    library: state.libraryPack,
+    runtime: state.runtime,
+    sceneId,
+    mode: "replace",
+    now: safeNow()
+  }));
 }
 async function handleSaveCurrentScene() {
   const sceneName = state.draft.sceneName.trim() || state.roomState.activeScene?.name || "New scene";
-  if (!state.roomState.layers.length) {
+  const nextTracks = collectCurrentMixTracks(state.runtime, state.libraryPack);
+  if (!nextTracks.length) {
     setError("There is no active mix to save.");
     return;
   }
   setBusy(true);
   clearError();
   try {
-    await mutateSceneLibrary((draft, current2) => {
-      const existingId = current2.scenes.some((entry) => entry.id === state.roomState.activeScene?.id) ? state.roomState.activeScene.id : makeId("scene");
-      const nextScene = {
-        id: existingId,
-        name: sceneName,
-        updatedAt: safeNow(),
-        layers: state.roomState.layers.map(stripLayerForScene)
-      };
-      const existingIndex = draft.scenes.findIndex((entry) => entry.id === existingId);
-      if (existingIndex >= 0) {
-        draft.scenes[existingIndex] = nextScene;
-      } else {
-        draft.scenes.unshift(nextScene);
-      }
-    });
+    const reusableSceneId = state.runtime.activeScenes.length === 1 && state.runtime.activeScenes[0].sceneId !== LIVE_SCENE_ID ? state.runtime.activeScenes[0].sceneId : null;
+    persistLibraryPack(upsertLibraryScene({
+      library: state.libraryPack,
+      sceneId: reusableSceneId,
+      name: sceneName,
+      tracks: nextTracks,
+      now: safeNow()
+    }));
+    syncDerivedState();
     state.draft.sceneName = "";
-    setNotices(["Scenes are now stored inside the Owlbear room, so no local helper is required."]);
+    setNotices(["Scene saved to this browser library. File import/export will be added later on top of the same runtime logic."]);
     render();
   } catch (error) {
     setError(error instanceof Error ? error.message : "Failed to save scene.");
@@ -4163,13 +5013,19 @@ async function handleDeleteScene(sceneId) {
   setBusy(true);
   clearError();
   try {
-    await mutateSceneLibrary((draft) => {
-      const nextScenes = draft.scenes.filter((scene) => scene.id !== sceneId);
-      if (nextScenes.length === draft.scenes.length) {
-        return false;
-      }
-      draft.scenes = nextScenes;
+    const result = deleteSceneFromLibrary({
+      library: state.libraryPack,
+      runtime: state.runtime,
+      sceneId,
+      now: safeNow()
     });
+    persistLibraryPack(result.library);
+    if (state.runtime.activeScenes.some((scene) => scene.sceneId === sceneId)) {
+      await pushRuntime(result.runtime);
+    } else {
+      syncDerivedState();
+      render();
+    }
   } catch (error) {
     setError(error instanceof Error ? error.message : "Failed to delete scene.");
   } finally {
@@ -4188,6 +5044,7 @@ async function unlockLocalAudio() {
     LOCAL_CONTROL_CHANNEL,
     {
       type: "prime-local-audio",
+      roomRuntime: state.runtime,
       roomState: state.roomState
     },
     { destination: "LOCAL" }
@@ -4324,7 +5181,7 @@ function renderMixOverview() {
       <article class="panel stat-card">
         <span class="stat-label">Saved scenes</span>
         <strong>${sceneCount}</strong>
-        <span class="muted">Shared with this room</span>
+        <span class="muted">Stored on this browser</span>
       </article>
     </section>
   `;
@@ -4416,7 +5273,7 @@ function renderAddTrackPanel() {
       <div class="section-row">
         <div>
           <h2>Queue a new layer</h2>
-          <p class="muted">Paste a direct YouTube or YouTube Music watch link and add it straight to the live mix.</p>
+          <p class="muted">Paste a direct YouTube or YouTube Music watch link and add it straight to the local live mix.</p>
         </div>
         <button class="action-button" data-action="add-track" ${state.busy ? "disabled" : ""}>Add to mix</button>
       </div>
@@ -4424,7 +5281,7 @@ function renderAddTrackPanel() {
       <input id="track-url" name="draftUrl" type="url" value="${escapeHtml(state.draft.url)}" placeholder="https://www.youtube.com/watch?v=..." />
       <label class="field-label" for="track-title">Custom title</label>
       <input id="track-title" name="draftTitle" type="text" value="${escapeHtml(state.draft.title)}" placeholder="Optional scene-friendly title" />
-      <p class="muted">No helper is required now, but the link must expose a playable <code>v=</code> or <code>list=</code> ID.</p>
+      <p class="muted">No helper is required now. Use a direct YouTube or YouTube Music link with a playable ID.</p>
     </section>
   `;
 }
@@ -4513,7 +5370,7 @@ function renderScenesPanel() {
       <div class="section-row">
         <div>
           <h2>Scene library</h2>
-          <p class="muted">Scenes are now stored inside the Owlbear room, so any GM opening this room can use them.</p>
+          <p class="muted">Scenes are currently stored on this browser. File import/export will be wired on top of this logic later.</p>
         </div>
       </div>
       <label class="field-label" for="scene-name">Save current mix as a scene</label>
@@ -4746,8 +5603,8 @@ lib_default.onReady(async () => {
     refreshLocalClientStatus()
   ]);
   lib_default.room.onMetadataChange((metadata) => {
-    state.roomState = ensureRoomState(metadata[ROOM_STATE_KEY]);
-    state.library = ensureSceneLibrary(metadata[SCENE_LIBRARY_KEY]);
+    state.runtime = ensureRoomRuntime(metadata[ROOM_STATE_KEY]);
+    syncDerivedState();
     render();
   });
   lib_default.player.onChange((player) => {
@@ -4757,7 +5614,8 @@ lib_default.onReady(async () => {
   });
   lib_default.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {
     if (event.data?.roomState) {
-      state.roomState = ensureRoomState(event.data.roomState);
+      state.runtime = ensureRoomRuntime(event.data.roomState);
+      syncDerivedState();
       render();
     }
   });
