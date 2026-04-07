@@ -711,17 +711,10 @@ export function App() {
       return;
     }
 
-    const params = new URLSearchParams(window.location.search);
-    const popoverId =
-      params.get("id") ?? params.get("popoverId") ?? params.get("popover");
-    if (!popoverId) {
-      return;
-    }
-
     const width = isPlayerView ? PLAYER_POPOVER_WIDTH : GM_POPOVER_WIDTH;
     const height = isPlayerView ? PLAYER_POPOVER_HEIGHT : GM_POPOVER_HEIGHT;
-    void OBR.popover.setWidth(popoverId, width);
-    void OBR.popover.setHeight(popoverId, height);
+    void OBR.action.setWidth(width);
+    void OBR.action.setHeight(height);
   }, [isOwlbearReady, isPlayerView]);
 
   return (
