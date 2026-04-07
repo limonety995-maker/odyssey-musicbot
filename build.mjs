@@ -18,13 +18,14 @@ const staticFiles = [
 
 const bundleOptions = {
   entryPoints: {
-    main: path.join(srcDir, "main.js"),
-    background: path.join(srcDir, "background.js"),
+    main: path.join(srcDir, "main.tsx"),
+    background: path.join(srcDir, "background.ts"),
   },
   bundle: true,
   format: "esm",
   target: "es2022",
   platform: "browser",
+  jsx: "automatic",
   outdir: path.join(outDir, "assets"),
   sourcemap: false,
   logLevel: "info",

@@ -1,0 +1,23 @@
+{
+  "name": "Odyssey Music",
+  "version": "0.3.0",
+  "manifest_version": 1,
+  "author": "Codex",
+  "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.3.0",
+  "description": "React rewrite scaffold for an Owlbear Rodeo music extension.",
+  "homepage_url": "https://github.com/limonety995-maker/odyssey-musicbot",
+  "action": {
+    "title": "Odyssey Music",
+    "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.3.0",
+    "popover": "https://limonety995-maker.github.io/odyssey-musicbot/index.html?v=0.3.0",
+    "width": 480,
+    "height": 720
+  },
+  "background_url": "https://limonety995-maker.github.io/odyssey-musicbot/background.html?v=0.3.0",
+  "permissions": [
+    {
+      "name": "autoplay",
+      "reason": "Needed so the extension can eventually start synchronized music for all players."
+    }
+  ]
+}

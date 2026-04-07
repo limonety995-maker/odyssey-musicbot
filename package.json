@@ -1,17 +1,25 @@
 {
   "name": "owlbear-sync-music",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "vite --config vite.config.ts",
+    "dev:dist": "node dev.mjs",
     "build": "node build.mjs",
-    "build:watch": "node build.mjs --watch",
-    "helper": "node helper/server.js"
+    "build:watch": "node build.mjs --watch"
   },
   "dependencies": {
-    "@owlbear-rodeo/sdk": "3.1.0"
+    "@owlbear-rodeo/sdk": "3.1.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
-    "esbuild": "0.25.10"
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.3",
+    "esbuild": "0.25.10",
+    "typescript": "5.6.3",
+    "vite": "5.4.10"
   }
 }
