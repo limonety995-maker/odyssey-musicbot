@@ -49,12 +49,37 @@ body.player-view-body {
 }
 
 .container.player-view .audioplayer-container {
-  border-radius: 12px;
+  border-radius: 8px;
+  padding: 8px 12px;
+  gap: 6px;
 }
 
-.container.player-view .loaded-track-panel {
-  max-height: 170px;
-  overflow-y: auto;
+.container.player-view .footer-main-row {
+  flex-wrap: nowrap;
+  gap: 10px;
+}
+
+.container.player-view .song-name-container {
+  min-width: 0;
+  flex: 1;
+}
+
+.container.player-view .song-meta {
+  min-width: 0;
+}
+
+.container.player-view .song-meta p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.container.player-view .song-meta .muted {
+  display: none;
+}
+
+.container.player-view .volume-controls {
+  gap: 8px;
 }
 
 .navigation {

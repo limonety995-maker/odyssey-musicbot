@@ -693,7 +693,7 @@ export function App() {
   const canCreatePlaylist =
     route.type === "folder" && activeNode?.type === "folder";
   const isPlayerView = isOwlbearReady && !isGm;
-  const isLoadedPanelOpen = isPlayerView || showLoadedTracks;
+  const isLoadedPanelOpen = !isPlayerView && showLoadedTracks;
 
   useEffect(() => {
     document.body.classList.toggle("player-view-body", isPlayerView);

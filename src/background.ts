@@ -1,10 +1,10 @@
 import OBR from "@owlbear-rodeo/sdk";
 
 const statusElement = document.getElementById("background-status");
-const GM_POPOVER_WIDTH = 620;
-const GM_POPOVER_HEIGHT = 760;
-const PLAYER_POPOVER_WIDTH = 520;
-const PLAYER_POPOVER_HEIGHT = 280;
+const GM_POPOVER_WIDTH = 585;
+const GM_POPOVER_HEIGHT = 400;
+const PLAYER_POPOVER_WIDTH = 585;
+const PLAYER_POPOVER_HEIGHT = 55;
 
 function setStatus(message: string) {
   if (statusElement) {
