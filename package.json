@@ -1,6 +1,6 @@
 {
   "name": "owlbear-sync-music",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -23,5 +23,6 @@
     "vite": "5.4.10"
   }
 }
+
 
 
