@@ -49,9 +49,14 @@ body.player-view-body {
 }
 
 .container.player-view .audioplayer-container {
-  border-radius: 8px;
+  border-radius: 12px;
   padding: 8px 12px;
   gap: 6px;
+}
+
+.container.player-view .player-static-toggle {
+  pointer-events: none;
+  cursor: default;
 }
 
 .container.player-view .footer-main-row {

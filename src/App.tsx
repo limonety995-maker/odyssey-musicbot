@@ -837,7 +837,13 @@ export function App() {
                   ></use>
                 </svg>
               </button>
-            ) : null}
+            ) : (
+              <span className="icon-button player-static-toggle" aria-hidden="true">
+                <svg width="16" height="16" className="icon">
+                  <use xlinkHref={`${spriteHref}#icon-down`}></use>
+                </svg>
+              </span>
+            )}
             <svg
               height="28"
               width="28"
