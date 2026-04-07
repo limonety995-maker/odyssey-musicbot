@@ -4,7 +4,7 @@ import { PlaylistInspector } from "./components/PlaylistInspector";
 import { TreeBranch } from "./components/LibraryTree";
 import { useLibraryStore } from "./hooks/useLibraryStore";
 import type { LibraryNode, NodeId, PlaylistNode } from "./types";
-import rawSpriteMarkup from "./sprite/sprite.svg?raw";
+import spriteUrl from "./sprite/sprite.svg";
 
 type RouteState =
   | { type: "root" }
@@ -20,8 +20,6 @@ type LoadedPlaylist = {
   currentTrackIndex: number;
   restartToken: number;
 };
-
-const spriteMarkup = rawSpriteMarkup.replace(/style="display:\s*none;?"/i, "");
 
 type NodeModalMode =
   | { type: "closed" }
@@ -90,6 +88,33 @@ export function App() {
   const [nodeModal, setNodeModal] = useState<NodeModalMode>({ type: "closed" });
   const [nodeNameDraft, setNodeNameDraft] = useState("");
   const [nodeColorDraft, setNodeColorDraft] = useState("#f4b463");
+  const [spriteMarkup, setSpriteMarkup] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch(spriteUrl)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Failed to load sprite.");
+        }
+        return response.text();
+      })
+      .then((markup) => {
+        if (!cancelled) {
+          setSpriteMarkup(markup.replace(/style="display:\s*none;?"/i, ""));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSpriteMarkup("");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const handleHashChange = () => {
@@ -449,11 +474,13 @@ export function App() {
 
   return (
     <div className="container">
-      <div
-        aria-hidden="true"
-        className="sprite-definitions"
-        dangerouslySetInnerHTML={{ __html: spriteMarkup }}
-      />
+      {spriteMarkup ? (
+        <div
+          aria-hidden="true"
+          className="sprite-definitions"
+          dangerouslySetInnerHTML={{ __html: spriteMarkup }}
+        />
+      ) : null}
       <nav className="navigation">
         <div className="header-container">
           <svg width="16" height="16" className="icon">
