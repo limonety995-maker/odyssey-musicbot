@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   FolderNode,
   LibraryNode,
@@ -532,6 +532,10 @@ export function useLibraryStore() {
     });
   }
 
+  const replaceLibrary = useCallback((nextLibrary: LibraryState) => {
+    setLibrary(nextLibrary);
+  }, []);
+
   return {
     library,
     selectedId,
@@ -547,5 +551,6 @@ export function useLibraryStore() {
     getTracksForPlaylist,
     addTrackToPlaylist,
     removeTrackFromPlaylist,
+    replaceLibrary,
   };
 }

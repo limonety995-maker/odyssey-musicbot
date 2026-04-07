@@ -562,6 +562,10 @@ ul {
   inset: -9999px;
 }
 
+.player-footer-spacer {
+  flex: 1;
+}
+
 .sprite-definitions {
   position: absolute;
   width: 0;
