@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import OBR from "@owlbear-rodeo/sdk";
 import { EmbeddedPlayer } from "./components/EmbeddedPlayer";
 import { PlaylistInspector } from "./components/PlaylistInspector";
 import { TreeBranch } from "./components/LibraryTree";
 import { useLibraryStore } from "./hooks/useLibraryStore";
-import type { LibraryNode, NodeId, PlaylistNode } from "./types";
+import type { LibraryNode, LibraryState, NodeId, PlaylistNode } from "./types";
 import spriteUrl from "./sprite/sprite.svg";
 
 type RouteState =
@@ -21,7 +22,61 @@ type LoadedPlaylist = {
   restartToken: number;
 };
 
+type SharedRoomState = {
+  version: 1;
+  library: LibraryState;
+  playback: {
+    loadedPlaylists: LoadedPlaylist[];
+    masterVolume: number;
+    isMuted: boolean;
+  };
+  updatedAt: number;
+  updatedBy: string;
+};
+
+const ROOM_SYNC_KEY = "odyssey-music/sync-v1";
+
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isLoadedPlaylist(value: unknown): value is LoadedPlaylist {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.name === "string"
+    && typeof value.volume === "number"
+    && typeof value.isPlaying === "boolean"
+    && typeof value.isRepeatingTrack === "boolean"
+    && typeof value.currentTrackIndex === "number"
+    && typeof value.restartToken === "number";
+}
+
+function asSharedRoomState(value: unknown): SharedRoomState | null {
+  if (!isRecord(value) || value.version !== 1) {
+    return null;
+  }
+
+  const playback = value.playback;
+  if (!isRecord(playback)) {
+    return null;
+  }
+
+  if (
+    !Array.isArray(playback.loadedPlaylists)
+    || !playback.loadedPlaylists.every(isLoadedPlaylist)
+    || typeof playback.masterVolume !== "number"
+    || typeof playback.isMuted !== "boolean"
+    || !isRecord(value.library)
+    || typeof value.updatedAt !== "number"
+    || typeof value.updatedBy !== "string"
+  ) {
+    return null;
+  }
+
+  return value as SharedRoomState;
+}
 
 type NodeModalMode =
   | { type: "closed" }
@@ -79,6 +134,7 @@ export function App() {
     getTrackCount,
     getTracksForPlaylist,
     library,
+    replaceLibrary,
     removeTrackFromPlaylist,
     updateNode,
   } = useLibraryStore();
@@ -90,6 +146,11 @@ export function App() {
   const [nodeModal, setNodeModal] = useState<NodeModalMode>({ type: "closed" });
   const [nodeNameDraft, setNodeNameDraft] = useState("");
   const [nodeColorDraft, setNodeColorDraft] = useState("#f4b463");
+  const [isOwlbearReady, setIsOwlbearReady] = useState(false);
+  const [isGm, setIsGm] = useState(true);
+  const applyingRemoteStateRef = useRef(false);
+  const playerIdRef = useRef<string>("local");
+  const lastWrittenStateRef = useRef<string>("");
   
   useEffect(() => {
     const handleHashChange = () => {
@@ -99,6 +160,89 @@ export function App() {
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribeRoomMetadata: (() => void) | undefined;
+
+    const applySharedState = (sharedState: SharedRoomState) => {
+      applyingRemoteStateRef.current = true;
+      replaceLibrary(sharedState.library);
+      setLoadedPlaylists(sharedState.playback.loadedPlaylists);
+      setVolume(sharedState.playback.masterVolume);
+      setIsMuted(sharedState.playback.isMuted);
+      lastWrittenStateRef.current = JSON.stringify(sharedState);
+      applyingRemoteStateRef.current = false;
+    };
+
+    OBR.onReady(() => {
+      if (cancelled) {
+        return;
+      }
+
+      void (async () => {
+        const [role, metadata] = await Promise.all([
+          OBR.player.getRole(),
+          OBR.room.getMetadata(),
+        ]);
+        if (cancelled) {
+          return;
+        }
+
+        playerIdRef.current = OBR.player.id;
+        setIsGm(role === "GM");
+        setIsOwlbearReady(true);
+
+        const initialShared = asSharedRoomState(metadata[ROOM_SYNC_KEY]);
+        if (initialShared) {
+          applySharedState(initialShared);
+        }
+
+        unsubscribeRoomMetadata = OBR.room.onMetadataChange((nextMetadata) => {
+          if (cancelled) {
+            return;
+          }
+
+          const nextShared = asSharedRoomState(nextMetadata[ROOM_SYNC_KEY]);
+          if (!nextShared) {
+            return;
+          }
+
+          applySharedState(nextShared);
+        });
+      })();
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribeRoomMetadata?.();
+    };
+  }, [replaceLibrary]);
+
+  useEffect(() => {
+    if (!isOwlbearReady || !isGm || applyingRemoteStateRef.current) {
+      return;
+    }
+
+    const nextShared: SharedRoomState = {
+      version: 1,
+      library,
+      playback: {
+        loadedPlaylists,
+        masterVolume: volume,
+        isMuted,
+      },
+      updatedAt: Date.now(),
+      updatedBy: playerIdRef.current,
+    };
+
+    const serialized = JSON.stringify(nextShared);
+    if (serialized === lastWrittenStateRef.current) {
+      return;
+    }
+    lastWrittenStateRef.current = serialized;
+    void OBR.room.setMetadata({ [ROOM_SYNC_KEY]: nextShared });
+  }, [isGm, isMuted, isOwlbearReady, library, loadedPlaylists, volume]);
 
   const activeNode = useMemo(() => {
     if (route.type === "root") {
@@ -446,137 +590,146 @@ export function App() {
   const isDiskSpinning = loadedPlaylists.some((playlist) => playlist.isPlaying);
   const canCreatePlaylist =
     route.type === "folder" && activeNode?.type === "folder";
+  const isPlayerView = isOwlbearReady && !isGm;
+  const isLoadedPanelOpen = isPlayerView || showLoadedTracks;
 
   return (
     <div className="container">
       
-      <nav className="navigation">
-        <div className="header-container">
-          <svg width="16" height="16" className="icon">
-            <use xlinkHref={`${spriteHref}#icon-folderempty`}></use>
-          </svg>
-          <div className="breadcrumb">
-            {pathItems.map((item, index) => (
-              <button
-                key={item.id ?? "root"}
-                className={`breadcrumb-link ${index === pathItems.length - 1 ? "is-current" : ""}`}
-                type="button"
-                onClick={() => {
-                  if (item.id) {
-                    navigateToNode(item.id);
-                    return;
-                  }
-
-                  navigateToRoot();
-                }}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <button
-          className="icon-button"
-          type="button"
-          onClick={openEditModal}
-          disabled={!activeNode}
-        >
-          <svg width="16" height="16" className="icon">
-            <use xlinkHref={`${spriteHref}#icon-edit`}></use>
-          </svg>
-        </button>
-      </nav>
-
-      <section className="content-container">
-        {activePlaylist ? (
-          <PlaylistInspector
-            selectedPlaylist={activePlaylist}
-            trackCount={getTrackCount(activePlaylist.id)}
-            tracks={activePlaylistTracks}
-            onAddTrack={(title, url) =>
-              addTrackToPlaylist(activePlaylist.id, title, url)
-            }
-            onRemoveTrack={(trackId) =>
-              removeTrackFromPlaylist(activePlaylist.id, trackId)
-            }
-          />
-        ) : (
-          <>
-            <ul className="folder-list">
-              {visibleNodeIds.map((nodeId) => (
-                <TreeBranch
-                  key={nodeId}
-                  nodeId={nodeId}
-                  getNode={getNode}
-                  isActive={activeNode?.id === nodeId}
-                  onNavigate={navigateToNode}
-                  onLoadPlaylist={loadPlaylist}
-                />
-              ))}
-              {route.type === "root" ? (
-                <li className="list-item">
+      {!isPlayerView ? (
+        <>
+          <nav className="navigation">
+            <div className="header-container">
+              <svg width="16" height="16" className="icon">
+                <use xlinkHref={`${spriteHref}#icon-folderempty`}></use>
+              </svg>
+              <div className="breadcrumb">
+                {pathItems.map((item, index) => (
                   <button
-                    className="icon-button folder"
+                    key={item.id ?? "root"}
+                    className={`breadcrumb-link ${index === pathItems.length - 1 ? "is-current" : ""}`}
                     type="button"
                     onClick={() => {
-                      openCreateModal("folder");
+                      if (item.id) {
+                        navigateToNode(item.id);
+                        return;
+                      }
+
+                      navigateToRoot();
                     }}
                   >
-                    <svg width="72" height="72" className="icon node-icon">
-                      <use xlinkHref={`${spriteHref}#icon-addfolder`}></use>
-                    </svg>
-                    New folder
+                    {item.label}
                   </button>
-                </li>
-              ) : null}
-              {canCreatePlaylist ? (
-                <li className="list-item">
-                  <button
-                    className="icon-button folder"
-                    type="button"
-                    onClick={() => {
-                      openCreateModal("playlist");
-                    }}
-                  >
-                    <svg
-                      width="72"
-                      height="72"
-                      className="icon node-icon playlist-create-icon"
-                    >
-                      <use xlinkHref={`${spriteHref}#icon-addfolder`}></use>
-                    </svg>
-                    New playlist
-                  </button>
-                </li>
-              ) : null}
-            </ul>
-            {visibleNodeIds.length === 0 ? (
-              <div className="empty-state">
-                <p className="muted">
-                  {route.type === "root"
-                    ? "Your main view starts with folders. Create one to organize your playlists."
-                    : "This folder has no playlists yet. Create one to start adding tracks."}
-                </p>
+                ))}
               </div>
-            ) : null}
-          </>
-        )}
-      </section>
-
-      <footer className="audioplayer-container">
-        <div className="footer-main-row">
-          <div className="song-name-container">
+            </div>
             <button
               className="icon-button"
               type="button"
-              onClick={() => setShowLoadedTracks((current) => !current)}
+              onClick={openEditModal}
+              disabled={!activeNode}
             >
               <svg width="16" height="16" className="icon">
-                <use
-                  xlinkHref={`${spriteHref}#${showLoadedTracks ? "icon-up" : "icon-down"}`}
-                ></use>
+                <use xlinkHref={`${spriteHref}#icon-edit`}></use>
               </svg>
             </button>
+          </nav>
+
+          <section className="content-container">
+            {activePlaylist ? (
+              <PlaylistInspector
+                selectedPlaylist={activePlaylist}
+                trackCount={getTrackCount(activePlaylist.id)}
+                tracks={activePlaylistTracks}
+                onAddTrack={(title, url) =>
+                  addTrackToPlaylist(activePlaylist.id, title, url)
+                }
+                onRemoveTrack={(trackId) =>
+                  removeTrackFromPlaylist(activePlaylist.id, trackId)
+                }
+              />
+            ) : (
+              <>
+                <ul className="folder-list">
+                  {visibleNodeIds.map((nodeId) => (
+                    <TreeBranch
+                      key={nodeId}
+                      nodeId={nodeId}
+                      getNode={getNode}
+                      isActive={activeNode?.id === nodeId}
+                      onNavigate={navigateToNode}
+                      onLoadPlaylist={loadPlaylist}
+                    />
+                  ))}
+                  {route.type === "root" ? (
+                    <li className="list-item">
+                      <button
+                        className="icon-button folder"
+                        type="button"
+                        onClick={() => {
+                          openCreateModal("folder");
+                        }}
+                      >
+                        <svg width="72" height="72" className="icon node-icon">
+                          <use xlinkHref={`${spriteHref}#icon-addfolder`}></use>
+                        </svg>
+                        New folder
+                      </button>
+                    </li>
+                  ) : null}
+                  {canCreatePlaylist ? (
+                    <li className="list-item">
+                      <button
+                        className="icon-button folder"
+                        type="button"
+                        onClick={() => {
+                          openCreateModal("playlist");
+                        }}
+                      >
+                        <svg
+                          width="72"
+                          height="72"
+                          className="icon node-icon playlist-create-icon"
+                        >
+                          <use xlinkHref={`${spriteHref}#icon-addfolder`}></use>
+                        </svg>
+                        New playlist
+                      </button>
+                    </li>
+                  ) : null}
+                </ul>
+                {visibleNodeIds.length === 0 ? (
+                  <div className="empty-state">
+                    <p className="muted">
+                      {route.type === "root"
+                        ? "Your main view starts with folders. Create one to organize your playlists."
+                        : "This folder has no playlists yet. Create one to start adding tracks."}
+                    </p>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </section>
+        </>
+      ) : null}
+
+      {isPlayerView ? <div className="player-footer-spacer" /> : null}
+      <footer className="audioplayer-container">
+        <div className="footer-main-row">
+          <div className="song-name-container">
+            {!isPlayerView ? (
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => setShowLoadedTracks((current) => !current)}
+              >
+                <svg width="16" height="16" className="icon">
+                  <use
+                    xlinkHref={`${spriteHref}#${showLoadedTracks ? "icon-up" : "icon-down"}`}
+                  ></use>
+                </svg>
+              </button>
+            ) : null}
             <svg
               height="28"
               width="28"
@@ -597,47 +750,51 @@ export function App() {
               </p>
             </div>
           </div>
-          <div className="play-bar">
-            <button
-              className="icon-button"
-              type="button"
-              onClick={resumePlayback}
-            >
-              <svg width="16" height="16" className="icon">
-                <use xlinkHref={`${spriteHref}#icon-play`}></use>
-              </svg>
-            </button>
-            <button
-              className="icon-button"
-              type="button"
-              onClick={pausePlayback}
-            >
-              <svg width="16" height="16" className="icon">
-                <use xlinkHref={`${spriteHref}#icon-pause`}></use>
-              </svg>
-            </button>
-            <button
-              className="icon-button"
-              type="button"
-              onClick={stopPlayback}
-            >
-              <svg width="16" height="16" className="icon">
-                <use xlinkHref={`${spriteHref}#icon-stop`}></use>
-              </svg>
-            </button>
-          </div>
+          {!isPlayerView ? (
+            <div className="play-bar">
+              <button
+                className="icon-button"
+                type="button"
+                onClick={resumePlayback}
+              >
+                <svg width="16" height="16" className="icon">
+                  <use xlinkHref={`${spriteHref}#icon-play`}></use>
+                </svg>
+              </button>
+              <button
+                className="icon-button"
+                type="button"
+                onClick={pausePlayback}
+              >
+                <svg width="16" height="16" className="icon">
+                  <use xlinkHref={`${spriteHref}#icon-pause`}></use>
+                </svg>
+              </button>
+              <button
+                className="icon-button"
+                type="button"
+                onClick={stopPlayback}
+              >
+                <svg width="16" height="16" className="icon">
+                  <use xlinkHref={`${spriteHref}#icon-stop`}></use>
+                </svg>
+              </button>
+            </div>
+          ) : null}
           <div className="volume-controls">
-            <button
-              className="icon-button"
-              type="button"
-              onClick={() => setIsMuted((current) => !current)}
-            >
-              <svg width="16" height="16" className="icon">
-                <use
-                  xlinkHref={`${spriteHref}#${isMuted ? "icon-mute" : "icon-loud"}`}
-                ></use>
-              </svg>
-            </button>
+            {!isPlayerView ? (
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => setIsMuted((current) => !current)}
+              >
+                <svg width="16" height="16" className="icon">
+                  <use
+                    xlinkHref={`${spriteHref}#${isMuted ? "icon-mute" : "icon-loud"}`}
+                  ></use>
+                </svg>
+              </button>
+            ) : null}
             <input
               className="volume-slider"
               type="range"
@@ -655,7 +812,7 @@ export function App() {
             />
           </div>
         </div>
-        {showLoadedTracks ? (
+        {isLoadedPanelOpen ? (
           <div className="loaded-track-panel">
             {loadedPlaylists.length > 0 ? (
               <>
@@ -685,118 +842,128 @@ export function App() {
                             </p>
                           </div>
                           <div className="playlist-controls-row">
-                            <button
-                              className="icon-button playlist-inline-control"
-                              type="button"
-                              onClick={() => stepPlaylistTrack(playlist.id, -1)}
-                              disabled={trackIds.length === 0}
-                            >
-                              <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`${spriteHref}#icon-back`}></use>
-                              </svg>
-                            </button>
-                            <button
-                              className="icon-button playlist-inline-control"
-                              type="button"
-                              onClick={() => {
-                                setLoadedPlaylists((current) =>
-                                  current.map((entry) =>
-                                    entry.id === playlist.id
-                                      ? { ...entry, isPlaying: true }
-                                      : entry,
-                                  ),
-                                );
-                              }}
-                            >
-                              <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`${spriteHref}#icon-play`}></use>
-                              </svg>
-                            </button>
-                            <button
-                              className="icon-button playlist-inline-control"
-                              type="button"
-                              onClick={() => {
-                                setLoadedPlaylists((current) =>
-                                  current.map((entry) =>
-                                    entry.id === playlist.id
-                                      ? { ...entry, isPlaying: false }
-                                      : entry,
-                                  ),
-                                );
-                              }}
-                            >
-                              <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`${spriteHref}#icon-pause`}></use>
-                              </svg>
-                            </button>
-                            <button
-                              className={`icon-button playlist-inline-control ${playlist.isRepeatingTrack ? "is-active" : ""}`}
-                              type="button"
-                              onClick={() => {
-                                setLoadedPlaylists((current) =>
-                                  current.map((entry) =>
-                                    entry.id === playlist.id
-                                      ? {
-                                          ...entry,
-                                          isRepeatingTrack: !entry.isRepeatingTrack,
-                                        }
-                                      : entry,
-                                  ),
-                                );
-                              }}
-                            >
-                              <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`${spriteHref}#icon-repeat`}></use>
-                              </svg>
-                            </button>
-                            <button
-                              className="icon-button playlist-inline-control"
-                              type="button"
-                              onClick={() => stepPlaylistTrack(playlist.id, 1)}
-                              disabled={trackIds.length === 0}
-                            >
-                              <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`${spriteHref}#icon-next`}></use>
-                              </svg>
-                            </button>
+                            {!isPlayerView ? (
+                              <>
+                                <button
+                                  className="icon-button playlist-inline-control"
+                                  type="button"
+                                  onClick={() => stepPlaylistTrack(playlist.id, -1)}
+                                  disabled={trackIds.length === 0}
+                                >
+                                  <svg width="16" height="16" className="icon">
+                                    <use xlinkHref={`${spriteHref}#icon-back`}></use>
+                                  </svg>
+                                </button>
+                                <button
+                                  className="icon-button playlist-inline-control"
+                                  type="button"
+                                  onClick={() => {
+                                    setLoadedPlaylists((current) =>
+                                      current.map((entry) =>
+                                        entry.id === playlist.id
+                                          ? { ...entry, isPlaying: true }
+                                          : entry,
+                                      ),
+                                    );
+                                  }}
+                                >
+                                  <svg width="16" height="16" className="icon">
+                                    <use xlinkHref={`${spriteHref}#icon-play`}></use>
+                                  </svg>
+                                </button>
+                                <button
+                                  className="icon-button playlist-inline-control"
+                                  type="button"
+                                  onClick={() => {
+                                    setLoadedPlaylists((current) =>
+                                      current.map((entry) =>
+                                        entry.id === playlist.id
+                                          ? { ...entry, isPlaying: false }
+                                          : entry,
+                                      ),
+                                    );
+                                  }}
+                                >
+                                  <svg width="16" height="16" className="icon">
+                                    <use xlinkHref={`${spriteHref}#icon-pause`}></use>
+                                  </svg>
+                                </button>
+                                <button
+                                  className={`icon-button playlist-inline-control ${playlist.isRepeatingTrack ? "is-active" : ""}`}
+                                  type="button"
+                                  onClick={() => {
+                                    setLoadedPlaylists((current) =>
+                                      current.map((entry) =>
+                                        entry.id === playlist.id
+                                          ? {
+                                              ...entry,
+                                              isRepeatingTrack: !entry.isRepeatingTrack,
+                                            }
+                                          : entry,
+                                      ),
+                                    );
+                                  }}
+                                >
+                                  <svg width="16" height="16" className="icon">
+                                    <use xlinkHref={`${spriteHref}#icon-repeat`}></use>
+                                  </svg>
+                                </button>
+                                <button
+                                  className="icon-button playlist-inline-control"
+                                  type="button"
+                                  onClick={() => stepPlaylistTrack(playlist.id, 1)}
+                                  disabled={trackIds.length === 0}
+                                >
+                                  <svg width="16" height="16" className="icon">
+                                    <use xlinkHref={`${spriteHref}#icon-next`}></use>
+                                  </svg>
+                                </button>
+                              </>
+                            ) : (
+                              <p className="muted">Volume {playlist.volume}%</p>
+                            )}
                           </div>
-                          <input
-                            className="volume-slider playlist-volume-slider"
-                            type="range"
-                            min="0"
-                            max="100"
-                            value={playlist.volume}
-                            style={
-                              {
-                                "--slider-fill": `${playlist.volume}%`,
-                              } as CSSProperties
-                            }
-                            onChange={(event) => {
-                              const nextVolume = Number(event.target.value);
-                              setLoadedPlaylists((current) =>
-                                current.map((entry) =>
-                                  entry.id === playlist.id
-                                    ? { ...entry, volume: nextVolume }
-                                    : entry,
-                                ),
-                              );
-                            }}
-                          />
-                          <button
-                            className="icon-button"
-                            type="button"
-                            onClick={() => {
-                              setLoadedPlaylists((current) =>
-                                current.filter(
-                                  (entry) => entry.id !== playlist.id,
-                                ),
-                              );
-                            }}
-                          >
-                            <svg width="20" height="20" className="trash">
-                              <use xlinkHref={`${spriteHref}#icon-trash`}></use>
-                            </svg>
-                          </button>
+                          {!isPlayerView ? (
+                            <>
+                              <input
+                                className="volume-slider playlist-volume-slider"
+                                type="range"
+                                min="0"
+                                max="100"
+                                value={playlist.volume}
+                                style={
+                                  {
+                                    "--slider-fill": `${playlist.volume}%`,
+                                  } as CSSProperties
+                                }
+                                onChange={(event) => {
+                                  const nextVolume = Number(event.target.value);
+                                  setLoadedPlaylists((current) =>
+                                    current.map((entry) =>
+                                      entry.id === playlist.id
+                                        ? { ...entry, volume: nextVolume }
+                                        : entry,
+                                    ),
+                                  );
+                                }}
+                              />
+                              <button
+                                className="icon-button"
+                                type="button"
+                                onClick={() => {
+                                  setLoadedPlaylists((current) =>
+                                    current.filter(
+                                      (entry) => entry.id !== playlist.id,
+                                    ),
+                                  );
+                                }}
+                              >
+                                <svg width="20" height="20" className="trash">
+                                  <use xlinkHref={`${spriteHref}#icon-trash`}></use>
+                                </svg>
+                              </button>
+                            </>
+                          ) : null}
                         </div>
                       </li>
                     );
@@ -816,7 +983,7 @@ export function App() {
         />
       </footer>
 
-      {nodeModal.type !== "closed" ? (
+      {!isPlayerView && nodeModal.type !== "closed" ? (
         <div
           className="modal-backdrop"
           role="presentation"
