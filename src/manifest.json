@@ -1,19 +1,19 @@
 {
   "name": "Odyssey Music",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "manifest_version": 1,
   "author": "Codex",
-  "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.3.4",
+  "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.3.5",
   "description": "React rewrite scaffold for an Owlbear Rodeo music extension.",
   "homepage_url": "https://github.com/limonety995-maker/odyssey-musicbot",
   "action": {
     "title": "Odyssey Music",
-    "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.3.4",
-    "popover": "https://limonety995-maker.github.io/odyssey-musicbot/index.html?v=0.3.4",
-    "width": 585,
-    "height": 400
+    "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.3.5",
+    "popover": "https://limonety995-maker.github.io/odyssey-musicbot/index.html?v=0.3.5",
+    "width": 620,
+    "height": 760
   },
-  "background_url": "https://limonety995-maker.github.io/odyssey-musicbot/background.html?v=0.3.4",
+  "background_url": "https://limonety995-maker.github.io/odyssey-musicbot/background.html?v=0.3.5",
   "permissions": [
     {
       "name": "autoplay",
@@ -21,6 +21,7 @@
     }
   ]
 }
+
 
 
 

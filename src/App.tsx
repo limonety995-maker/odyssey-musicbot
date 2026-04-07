@@ -38,6 +38,10 @@ const ROOM_SYNC_KEY = "odyssey-music/sync-v1";
 const SYNC_WRITE_DEBOUNCE_MS = 1200;
 const SYNC_MIN_WRITE_INTERVAL_MS = 1200;
 const SYNC_RATE_LIMIT_BACKOFF_MS = 5000;
+const GM_POPOVER_WIDTH = 620;
+const GM_POPOVER_HEIGHT = 760;
+const PLAYER_POPOVER_WIDTH = 520;
+const PLAYER_POPOVER_HEIGHT = 280;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
@@ -695,6 +699,31 @@ export function App() {
   const isPlayerView = isOwlbearReady && !isGm;
   const isLoadedPanelOpen = isPlayerView || showLoadedTracks;
 
+  useEffect(() => {
+    document.body.classList.toggle("player-view-body", isPlayerView);
+    return () => {
+      document.body.classList.remove("player-view-body");
+    };
+  }, [isPlayerView]);
+
+  useEffect(() => {
+    if (!isOwlbearReady) {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const popoverId =
+      params.get("id") ?? params.get("popoverId") ?? params.get("popover");
+    if (!popoverId) {
+      return;
+    }
+
+    const width = isPlayerView ? PLAYER_POPOVER_WIDTH : GM_POPOVER_WIDTH;
+    const height = isPlayerView ? PLAYER_POPOVER_HEIGHT : GM_POPOVER_HEIGHT;
+    void OBR.popover.setWidth(popoverId, width);
+    void OBR.popover.setHeight(popoverId, height);
+  }, [isOwlbearReady, isPlayerView]);
+
   return (
     <div className={`container ${isPlayerView ? "player-view" : ""}`}>
       
@@ -1020,34 +1049,32 @@ export function App() {
                                   </svg>
                                 </button>
                               </>
-                            ) : (
-                              <p className="muted">Volume {playlist.volume}%</p>
-                            )}
+                            ) : null}
                           </div>
+                          <input
+                            className="volume-slider playlist-volume-slider"
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={playlist.volume}
+                            style={
+                              {
+                                "--slider-fill": `${playlist.volume}%`,
+                              } as CSSProperties
+                            }
+                            onChange={(event) => {
+                              const nextVolume = Number(event.target.value);
+                              setLoadedPlaylists((current) =>
+                                current.map((entry) =>
+                                  entry.id === playlist.id
+                                    ? { ...entry, volume: nextVolume }
+                                    : entry,
+                                ),
+                              );
+                            }}
+                          />
                           {!isPlayerView ? (
                             <>
-                              <input
-                                className="volume-slider playlist-volume-slider"
-                                type="range"
-                                min="0"
-                                max="100"
-                                value={playlist.volume}
-                                style={
-                                  {
-                                    "--slider-fill": `${playlist.volume}%`,
-                                  } as CSSProperties
-                                }
-                                onChange={(event) => {
-                                  const nextVolume = Number(event.target.value);
-                                  setLoadedPlaylists((current) =>
-                                    current.map((entry) =>
-                                      entry.id === playlist.id
-                                        ? { ...entry, volume: nextVolume }
-                                        : entry,
-                                    ),
-                                  );
-                                }}
-                              />
                               <button
                                 className="icon-button"
                                 type="button"
