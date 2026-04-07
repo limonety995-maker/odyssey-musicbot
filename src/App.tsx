@@ -711,17 +711,35 @@ export function App() {
       return;
     }
 
-    const params = new URLSearchParams(window.location.search);
-    const popoverId =
-      params.get("id") ?? params.get("popoverId") ?? params.get("popover");
-    if (!popoverId) {
-      return;
-    }
-
     const width = isPlayerView ? PLAYER_POPOVER_WIDTH : GM_POPOVER_WIDTH;
     const height = isPlayerView ? PLAYER_POPOVER_HEIGHT : GM_POPOVER_HEIGHT;
-    void OBR.popover.setWidth(popoverId, width);
-    void OBR.popover.setHeight(popoverId, height);
+
+    const applySize = () => {
+      void OBR.action.setWidth(width).catch(() => {
+        // Ignore host sizing failures; we'll retry while popover is open.
+      });
+      void OBR.action.setHeight(height).catch(() => {
+        // Ignore host sizing failures; we'll retry while popover is open.
+      });
+    };
+
+    const retry1 = window.setTimeout(applySize, 0);
+    const retry2 = window.setTimeout(applySize, 250);
+    const retry3 = window.setTimeout(applySize, 1000);
+    const unsubscribe = OBR.action.onOpenChange((isOpen) => {
+      if (isOpen) {
+        applySize();
+      }
+    });
+
+    applySize();
+
+    return () => {
+      window.clearTimeout(retry1);
+      window.clearTimeout(retry2);
+      window.clearTimeout(retry3);
+      unsubscribe();
+    };
   }, [isOwlbearReady, isPlayerView]);
 
   return (
