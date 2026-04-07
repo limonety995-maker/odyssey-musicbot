@@ -41,7 +41,10 @@ const SYNC_RATE_LIMIT_BACKOFF_MS = 5000;
 const GM_POPOVER_WIDTH = 620;
 const GM_POPOVER_HEIGHT = 760;
 const PLAYER_POPOVER_WIDTH = 520;
-const PLAYER_POPOVER_HEIGHT = 280;
+const PLAYER_MIN_POPOVER_HEIGHT = 150;
+const PLAYER_BASE_POPOVER_HEIGHT = 120;
+const PLAYER_ROW_HEIGHT = 64;
+const PLAYER_MAX_POPOVER_HEIGHT = 320;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
@@ -712,7 +715,14 @@ export function App() {
     }
 
     const width = isPlayerView ? PLAYER_POPOVER_WIDTH : GM_POPOVER_WIDTH;
-    const height = isPlayerView ? PLAYER_POPOVER_HEIGHT : GM_POPOVER_HEIGHT;
+    const playerDesiredHeight = Math.min(
+      PLAYER_MAX_POPOVER_HEIGHT,
+      Math.max(
+        PLAYER_MIN_POPOVER_HEIGHT,
+        PLAYER_BASE_POPOVER_HEIGHT + loadedPlaylists.length * PLAYER_ROW_HEIGHT,
+      ),
+    );
+    const height = isPlayerView ? playerDesiredHeight : GM_POPOVER_HEIGHT;
 
     const applySize = () => {
       void OBR.action.setWidth(width).catch(() => {
@@ -740,7 +750,7 @@ export function App() {
       window.clearTimeout(retry3);
       unsubscribe();
     };
-  }, [isOwlbearReady, isPlayerView]);
+  }, [isOwlbearReady, isPlayerView, loadedPlaylists.length]);
 
   return (
     <div className={`container ${isPlayerView ? "player-view" : ""}`}>
