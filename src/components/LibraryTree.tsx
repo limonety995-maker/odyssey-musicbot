@@ -1,123 +1,83 @@
-import type { LibraryNode, NodeId } from "../types";
+import type { LibraryNode, NodeId, PlaylistNode } from "../types";
+import sprite from "../sprite//sprite.svg";
 
-function TreeBranch({
-  nodeId,
-  depth,
-  expandedIds,
-  selectedId,
-  getNode,
-  getTrackCount,
-  onToggle,
-  onSelect,
-}: {
+type TreeBranchProps = {
   nodeId: NodeId;
-  depth: number;
-  expandedIds: Set<NodeId>;
-  selectedId: NodeId | null;
   getNode: (nodeId: NodeId) => LibraryNode | null;
-  getTrackCount: (nodeId: NodeId) => number;
-  onToggle: (nodeId: NodeId) => void;
-  onSelect: (nodeId: NodeId) => void;
-}) {
-  const node = getNode(nodeId);
-  if (!node) {
-    return null;
-  }
+  isActive: boolean;
+  onNavigate: (nodeId: NodeId) => void;
+  onLoadPlaylist: (playlist: PlaylistNode) => void;
+};
 
-  if (node.type === "folder") {
-    const expanded = expandedIds.has(node.id);
+export function TreeBranch({
+  nodeId,
+  getNode,
+  isActive,
+  onNavigate,
+  onLoadPlaylist,
+}: TreeBranchProps) {
+  const node = getNode(nodeId);
+  if (!node) return null;
+
+  if (node.type === "playlist") {
     return (
-      <div className="tree-node">
-        <div
-          className={`tree-row ${selectedId === node.id ? "is-selected" : ""}`}
-          style={{ paddingLeft: `${depth * 14}px` }}
-        >
+      <li className="list-item">
+        <div className={`folder playlist-card ${isActive ? "is-active" : ""}`}>
           <button
-            className="tree-toggle"
+            className="icon-button playlist-main-button"
             type="button"
-            onClick={() => onToggle(node.id)}
+            onClick={() => onLoadPlaylist(node)}
           >
-            {expanded ? "-" : "+"}
-          </button>
-          <button
-            className="tree-label"
-            type="button"
-            onClick={() => onSelect(node.id)}
-          >
+            <svg
+              width="72"
+              height="72"
+              className="icon node-icon playlist-icon-default"
+              style={{ fill: node.iconColor }}
+            >
+              <use href={`${sprite}#icon-folder`} />
+            </svg>
+            <svg
+              width="72"
+              height="72"
+              className="icon node-icon playlist-icon-hover"
+              style={{ fill: node.iconColor }}
+            >
+              <use href={`${sprite}#icon-playfolder`} />
+            </svg>
             {node.name}
           </button>
+          <button
+            className="icon-button playlist-edit-button"
+            type="button"
+            onClick={() => onNavigate(node.id)}
+            aria-label={`Edit playlist ${node.name}`}
+          >
+            <svg width="18" height="18" className="icon">
+              <use href={`${sprite}#icon-edit`} />
+            </svg>
+          </button>
         </div>
-        {expanded ? (
-          <div className="tree-children">
-            {node.childIds.map((childId) => (
-              <TreeBranch
-                key={childId}
-                nodeId={childId}
-                depth={depth + 1}
-                expandedIds={expandedIds}
-                selectedId={selectedId}
-                getNode={getNode}
-                getTrackCount={getTrackCount}
-                onToggle={onToggle}
-                onSelect={onSelect}
-              />
-            ))}
-          </div>
-        ) : null}
-      </div>
+      </li>
     );
   }
 
   return (
-    <div
-      className={`tree-row ${selectedId === node.id ? "is-selected" : ""}`}
-      style={{ paddingLeft: `${depth * 14}px` }}
-    >
-      <span className="tree-toggle tree-toggle-placeholder" />
+    <li className="list-item">
       <button
-        className="tree-label"
+        className={`icon-button folder ${isActive ? "is-active" : ""}`}
         type="button"
-        onClick={() => onSelect(node.id)}
+        onClick={() => onNavigate(node.id)}
       >
-        <span>{node.name}</span>
-        <span className="tree-meta">{getTrackCount(node.id)} tracks</span>
+        <svg
+          width="72"
+          height="72"
+          className="icon node-icon"
+          style={{ fill: node.iconColor }}
+        >
+          <use href={`${sprite}#icon-folder`} />
+        </svg>
+        {node.name}
       </button>
-    </div>
-  );
-}
-
-export function LibraryTree({
-  rootIds,
-  expandedIds,
-  selectedId,
-  getNode,
-  getTrackCount,
-  onToggle,
-  onSelect,
-}: {
-  rootIds: NodeId[];
-  expandedIds: Set<NodeId>;
-  selectedId: NodeId | null;
-  getNode: (nodeId: NodeId) => LibraryNode | null;
-  getTrackCount: (nodeId: NodeId) => number;
-  onToggle: (nodeId: NodeId) => void;
-  onSelect: (nodeId: NodeId) => void;
-}) {
-  return (
-    <div className="tree-shell">
-      {rootIds.map((nodeId) => (
-        <TreeBranch
-          key={nodeId}
-          nodeId={nodeId}
-          depth={0}
-          expandedIds={expandedIds}
-          selectedId={selectedId}
-          getNode={getNode}
-          getTrackCount={getTrackCount}
-          onToggle={onToggle}
-          onSelect={onSelect}
-        />
-      ))}
-    </div>
+    </li>
   );
 }

@@ -1,10 +1,13 @@
 import esbuild from "esbuild";
-import { copyFileSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const srcDir = path.join(__dirname, "src", "extension");
+const extensionSrcDir = path.join(__dirname, "src", "extension");
+const srcDir = existsSync(extensionSrcDir)
+  ? extensionSrcDir
+  : path.join(__dirname, "src");
 const outDir = path.join(__dirname, "dist", "extension");
 const watchMode = process.argv.includes("--watch");
 
@@ -26,6 +29,9 @@ const bundleOptions = {
   target: "es2022",
   platform: "browser",
   jsx: "automatic",
+  loader: {
+    ".svg": "file",
+  },
   outdir: path.join(outDir, "assets"),
   sourcemap: false,
   logLevel: "info",

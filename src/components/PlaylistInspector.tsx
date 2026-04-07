@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { validatePlayableSource } from "./EmbeddedPlayer";
 import type { PlaylistNode, Track } from "../types";
 
 export function PlaylistInspector({
@@ -16,6 +17,8 @@ export function PlaylistInspector({
 }) {
   const [trackTitleDraft, setTrackTitleDraft] = useState("");
   const [trackUrlDraft, setTrackUrlDraft] = useState("");
+  const [trackError, setTrackError] = useState("");
+  const [isValidatingTrack, setIsValidatingTrack] = useState(false);
 
   if (!selectedPlaylist) {
     return (
@@ -54,21 +57,54 @@ export function PlaylistInspector({
         />
       </div>
       <div className="button-row">
-        <button className="action-button" type="button">
-          Load Playlist
-        </button>
         <button
-          className="ghost-button"
+          className="action-button"
           type="button"
-          onClick={() => {
+          disabled={isValidatingTrack}
+          onClick={async () => {
+            const trimmedUrl = trackUrlDraft.trim();
+            setTrackError("");
+
+            if (trimmedUrl) {
+              try {
+                new URL(trimmedUrl);
+              } catch {
+                setTrackError("Please enter a valid YouTube URL.");
+                return;
+              }
+
+              setIsValidatingTrack(true);
+              let validation: Awaited<ReturnType<typeof validatePlayableSource>>;
+
+              try {
+                validation = await validatePlayableSource(trimmedUrl);
+              } catch {
+                setIsValidatingTrack(false);
+                setTrackError("This track could not be verified right now. Please try again.");
+                return;
+              }
+
+              setIsValidatingTrack(false);
+
+              if (!validation.ok) {
+                setTrackError(
+                  validation.message
+                    ?? "This track could not be added because it failed playback validation.",
+                );
+                return;
+              }
+            }
+
             onAddTrack(trackTitleDraft, trackUrlDraft);
             setTrackTitleDraft("");
             setTrackUrlDraft("");
+            setTrackError("");
           }}
         >
-          Add Track
+          {isValidatingTrack ? "Checking track..." : "Add Track"}
         </button>
       </div>
+      {trackError ? <p className="form-error">{trackError}</p> : null}
       <div className="track-list">
         {tracks.map((track) => (
           <article key={track.id} className="track-list-item">

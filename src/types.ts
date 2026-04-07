@@ -5,6 +5,7 @@ export type FolderNode = {
   id: NodeId;
   type: "folder";
   name: string;
+  iconColor: string;
   parentId: NodeId | null;
   childIds: NodeId[];
 };
@@ -13,6 +14,7 @@ export type PlaylistNode = {
   id: NodeId;
   type: "playlist";
   name: string;
+  iconColor: string;
   parentId: NodeId | null;
   trackIds: TrackId[];
 };
