@@ -38,13 +38,6 @@ const ROOM_SYNC_KEY = "odyssey-music/sync-v1";
 const SYNC_WRITE_DEBOUNCE_MS = 1200;
 const SYNC_MIN_WRITE_INTERVAL_MS = 1200;
 const SYNC_RATE_LIMIT_BACKOFF_MS = 5000;
-const GM_POPOVER_WIDTH = 620;
-const GM_POPOVER_HEIGHT = 760;
-const PLAYER_POPOVER_WIDTH = 520;
-const PLAYER_MIN_POPOVER_HEIGHT = 150;
-const PLAYER_BASE_POPOVER_HEIGHT = 120;
-const PLAYER_ROW_HEIGHT = 64;
-const PLAYER_MAX_POPOVER_HEIGHT = 320;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
@@ -708,49 +701,6 @@ export function App() {
       document.body.classList.remove("player-view-body");
     };
   }, [isPlayerView]);
-
-  useEffect(() => {
-    if (!isOwlbearReady) {
-      return;
-    }
-
-    const width = isPlayerView ? PLAYER_POPOVER_WIDTH : GM_POPOVER_WIDTH;
-    const playerDesiredHeight = Math.min(
-      PLAYER_MAX_POPOVER_HEIGHT,
-      Math.max(
-        PLAYER_MIN_POPOVER_HEIGHT,
-        PLAYER_BASE_POPOVER_HEIGHT + loadedPlaylists.length * PLAYER_ROW_HEIGHT,
-      ),
-    );
-    const height = isPlayerView ? playerDesiredHeight : GM_POPOVER_HEIGHT;
-
-    const applySize = () => {
-      void OBR.action.setWidth(width).catch(() => {
-        // Ignore host sizing failures; we'll retry while popover is open.
-      });
-      void OBR.action.setHeight(height).catch(() => {
-        // Ignore host sizing failures; we'll retry while popover is open.
-      });
-    };
-
-    const retry1 = window.setTimeout(applySize, 0);
-    const retry2 = window.setTimeout(applySize, 250);
-    const retry3 = window.setTimeout(applySize, 1000);
-    const unsubscribe = OBR.action.onOpenChange((isOpen) => {
-      if (isOpen) {
-        applySize();
-      }
-    });
-
-    applySize();
-
-    return () => {
-      window.clearTimeout(retry1);
-      window.clearTimeout(retry2);
-      window.clearTimeout(retry3);
-      unsubscribe();
-    };
-  }, [isOwlbearReady, isPlayerView, loadedPlaylists.length]);
 
   return (
     <div className={`container ${isPlayerView ? "player-view" : ""}`}>
