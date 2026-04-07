@@ -1,4 +1,7 @@
 import type { LibraryNode, NodeId, PlaylistNode } from "../types";
+import spriteUrl from "../sprite/sprite.svg";
+
+const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
 type TreeBranchProps = {
   nodeId: NodeId;
@@ -33,7 +36,7 @@ export function TreeBranch({
               className="icon node-icon playlist-icon-default"
               style={{ fill: node.iconColor }}
             >
-              <use xlinkHref={`#icon-folder`} />
+              <use xlinkHref={`${spriteHref}#icon-folder`} />
             </svg>
             <svg
               width="72"
@@ -41,7 +44,7 @@ export function TreeBranch({
               className="icon node-icon playlist-icon-hover"
               style={{ fill: node.iconColor }}
             >
-              <use xlinkHref={`#icon-playfolder`} />
+              <use xlinkHref={`${spriteHref}#icon-playfolder`} />
             </svg>
             {node.name}
           </button>
@@ -52,7 +55,7 @@ export function TreeBranch({
             aria-label={`Edit playlist ${node.name}`}
           >
             <svg width="18" height="18" className="icon">
-              <use xlinkHref={`#icon-edit`} />
+              <use xlinkHref={`${spriteHref}#icon-edit`} />
             </svg>
           </button>
         </div>
@@ -73,11 +76,12 @@ export function TreeBranch({
           className="icon node-icon"
           style={{ fill: node.iconColor }}
         >
-          <use xlinkHref={`#icon-folder`} />
+          <use xlinkHref={`${spriteHref}#icon-folder`} />
         </svg>
         {node.name}
       </button>
     </li>
   );
 }
+
 

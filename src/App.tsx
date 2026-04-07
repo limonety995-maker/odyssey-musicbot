@@ -21,6 +21,8 @@ type LoadedPlaylist = {
   restartToken: number;
 };
 
+const spriteHref = new URL(spriteUrl, import.meta.url).toString();
+
 type NodeModalMode =
   | { type: "closed" }
   | { type: "edit"; nodeId: NodeId }
@@ -88,34 +90,7 @@ export function App() {
   const [nodeModal, setNodeModal] = useState<NodeModalMode>({ type: "closed" });
   const [nodeNameDraft, setNodeNameDraft] = useState("");
   const [nodeColorDraft, setNodeColorDraft] = useState("#f4b463");
-  const [spriteMarkup, setSpriteMarkup] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-
-    fetch(spriteUrl)
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error("Failed to load sprite.");
-        }
-        return response.text();
-      })
-      .then((markup) => {
-        if (!cancelled) {
-          setSpriteMarkup(markup.replace(/style="display:\s*none;?"/i, ""));
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setSpriteMarkup("");
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
+  
   useEffect(() => {
     const handleHashChange = () => {
       setRoute(parseRouteFromHash());
@@ -474,17 +449,11 @@ export function App() {
 
   return (
     <div className="container">
-      {spriteMarkup ? (
-        <div
-          aria-hidden="true"
-          className="sprite-definitions"
-          dangerouslySetInnerHTML={{ __html: spriteMarkup }}
-        />
-      ) : null}
+      
       <nav className="navigation">
         <div className="header-container">
           <svg width="16" height="16" className="icon">
-            <use xlinkHref={`#icon-folderempty`}></use>
+            <use xlinkHref={`${spriteHref}#icon-folderempty`}></use>
           </svg>
           <div className="breadcrumb">
             {pathItems.map((item, index) => (
@@ -513,7 +482,7 @@ export function App() {
           disabled={!activeNode}
         >
           <svg width="16" height="16" className="icon">
-            <use xlinkHref={`#icon-edit`}></use>
+            <use xlinkHref={`${spriteHref}#icon-edit`}></use>
           </svg>
         </button>
       </nav>
@@ -554,7 +523,7 @@ export function App() {
                     }}
                   >
                     <svg width="72" height="72" className="icon node-icon">
-                      <use xlinkHref={`#icon-addfolder`}></use>
+                      <use xlinkHref={`${spriteHref}#icon-addfolder`}></use>
                     </svg>
                     New folder
                   </button>
@@ -574,7 +543,7 @@ export function App() {
                       height="72"
                       className="icon node-icon playlist-create-icon"
                     >
-                      <use xlinkHref={`#icon-addfolder`}></use>
+                      <use xlinkHref={`${spriteHref}#icon-addfolder`}></use>
                     </svg>
                     New playlist
                   </button>
@@ -604,7 +573,7 @@ export function App() {
             >
               <svg width="16" height="16" className="icon">
                 <use
-                  href={`#${showLoadedTracks ? "icon-up" : "icon-down"}`}
+                  xlinkHref={`${spriteHref}#${showLoadedTracks ? "icon-up" : "icon-down"}`}
                 ></use>
               </svg>
             </button>
@@ -613,7 +582,7 @@ export function App() {
               width="28"
               className={`icon ${isDiskSpinning ? "disk-playing" : ""}`}
             >
-              <use xlinkHref={`#icon-Subtract`}></use>
+              <use xlinkHref={`${spriteHref}#icon-Subtract`}></use>
             </svg>
             <div className="song-meta">
               <p>
@@ -635,7 +604,7 @@ export function App() {
               onClick={resumePlayback}
             >
               <svg width="16" height="16" className="icon">
-                <use xlinkHref={`#icon-play`}></use>
+                <use xlinkHref={`${spriteHref}#icon-play`}></use>
               </svg>
             </button>
             <button
@@ -644,7 +613,7 @@ export function App() {
               onClick={pausePlayback}
             >
               <svg width="16" height="16" className="icon">
-                <use xlinkHref={`#icon-pause`}></use>
+                <use xlinkHref={`${spriteHref}#icon-pause`}></use>
               </svg>
             </button>
             <button
@@ -653,7 +622,7 @@ export function App() {
               onClick={stopPlayback}
             >
               <svg width="16" height="16" className="icon">
-                <use xlinkHref={`#icon-stop`}></use>
+                <use xlinkHref={`${spriteHref}#icon-stop`}></use>
               </svg>
             </button>
           </div>
@@ -665,7 +634,7 @@ export function App() {
             >
               <svg width="16" height="16" className="icon">
                 <use
-                  href={`#${isMuted ? "icon-mute" : "icon-loud"}`}
+                  xlinkHref={`${spriteHref}#${isMuted ? "icon-mute" : "icon-loud"}`}
                 ></use>
               </svg>
             </button>
@@ -723,7 +692,7 @@ export function App() {
                               disabled={trackIds.length === 0}
                             >
                               <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`#icon-back`}></use>
+                                <use xlinkHref={`${spriteHref}#icon-back`}></use>
                               </svg>
                             </button>
                             <button
@@ -740,7 +709,7 @@ export function App() {
                               }}
                             >
                               <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`#icon-play`}></use>
+                                <use xlinkHref={`${spriteHref}#icon-play`}></use>
                               </svg>
                             </button>
                             <button
@@ -757,7 +726,7 @@ export function App() {
                               }}
                             >
                               <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`#icon-pause`}></use>
+                                <use xlinkHref={`${spriteHref}#icon-pause`}></use>
                               </svg>
                             </button>
                             <button
@@ -777,7 +746,7 @@ export function App() {
                               }}
                             >
                               <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`#icon-repeat`}></use>
+                                <use xlinkHref={`${spriteHref}#icon-repeat`}></use>
                               </svg>
                             </button>
                             <button
@@ -787,7 +756,7 @@ export function App() {
                               disabled={trackIds.length === 0}
                             >
                               <svg width="16" height="16" className="icon">
-                                <use xlinkHref={`#icon-next`}></use>
+                                <use xlinkHref={`${spriteHref}#icon-next`}></use>
                               </svg>
                             </button>
                           </div>
@@ -825,7 +794,7 @@ export function App() {
                             }}
                           >
                             <svg width="20" height="20" className="trash">
-                              <use xlinkHref={`#icon-trash`}></use>
+                              <use xlinkHref={`${spriteHref}#icon-trash`}></use>
                             </svg>
                           </button>
                         </div>
@@ -931,7 +900,7 @@ export function App() {
                   onClick={deleteCurrentNode}
                 >
                   <svg width="16" height="16" className="icon">
-                    <use xlinkHref={`#icon-trash`}></use>
+                    <use xlinkHref={`${spriteHref}#icon-trash`}></use>
                   </svg>
                   Delete
                 </button>
@@ -943,4 +912,5 @@ export function App() {
     </div>
   );
 }
+
 
