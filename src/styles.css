@@ -52,6 +52,11 @@ body.player-view-body {
   border-radius: 12px;
 }
 
+.container.player-view .loaded-track-panel {
+  max-height: 170px;
+  overflow-y: auto;
+}
+
 .navigation {
   display: flex;
   background-color: #2D3040;
