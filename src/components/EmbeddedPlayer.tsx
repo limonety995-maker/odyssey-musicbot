@@ -27,7 +27,7 @@ declare global {
   interface Window {
     YT?: {
       Player: new (
-        elementId: string,
+        elementId: string | HTMLElement,
         options: {
           videoId: string;
           playerVars?: Record<string, number>;
@@ -284,6 +284,10 @@ export function EmbeddedPlayer({
       for (const [playlistId, player] of Object.entries(playersRef.current)) {
         if (!activePlaylistIds.has(playlistId)) {
           player.destroy();
+          const mountWrapper = document.getElementById(`yt-player-${playlistId}`);
+          if (mountWrapper) {
+            mountWrapper.innerHTML = "";
+          }
           delete playersRef.current[playlistId];
           delete currentVideoIdsRef.current[playlistId];
           delete restartTokensRef.current[playlistId];
@@ -295,7 +299,19 @@ export function EmbeddedPlayer({
         const existingPlayer = playersRef.current[entry.playlistId];
 
         if (!existingPlayer) {
-          playersRef.current[entry.playlistId] = new YT.Player(elementId, {
+          const mountWrapper = document.getElementById(elementId);
+          if (!mountWrapper) {
+            continue;
+          }
+
+          let mountHost = mountWrapper.querySelector<HTMLDivElement>(".yt-player-host");
+          if (!mountHost) {
+            mountHost = document.createElement("div");
+            mountHost.className = "yt-player-host";
+            mountWrapper.appendChild(mountHost);
+          }
+
+          playersRef.current[entry.playlistId] = new YT.Player(mountHost, {
             videoId: entry.videoId,
             playerVars: {
               autoplay: 0,

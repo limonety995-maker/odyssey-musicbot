@@ -35,7 +35,9 @@ type SharedRoomState = {
 };
 
 const ROOM_SYNC_KEY = "odyssey-music/sync-v1";
-const SYNC_WRITE_DEBOUNCE_MS = 300;
+const SYNC_WRITE_DEBOUNCE_MS = 1200;
+const SYNC_MIN_WRITE_INTERVAL_MS = 1200;
+const SYNC_RATE_LIMIT_BACKOFF_MS = 5000;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
@@ -77,6 +79,18 @@ function asSharedRoomState(value: unknown): SharedRoomState | null {
   }
 
   return value as SharedRoomState;
+}
+
+function isLibraryStateLike(value: unknown): value is LibraryState {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  if (!Array.isArray(value.rootIds) || !isRecord(value.nodesById) || !isRecord(value.tracksById)) {
+    return false;
+  }
+
+  return value.rootIds.every((id) => typeof id === "string");
 }
 
 function buildSharedSignature(input: {
@@ -164,6 +178,8 @@ export function App() {
   const lastSharedSignatureRef = useRef<string>("");
   const pendingSharedStateRef = useRef<SharedRoomState | null>(null);
   const syncWriteTimerRef = useRef<number | null>(null);
+  const lastSyncWriteAtRef = useRef(0);
+  const nextSyncWriteAllowedAtRef = useRef(0);
   
   useEffect(() => {
     const handleHashChange = () => {
@@ -179,6 +195,10 @@ export function App() {
     let unsubscribeRoomMetadata: (() => void) | undefined;
 
     const applySharedState = (sharedState: SharedRoomState) => {
+      if (!isLibraryStateLike(sharedState.library)) {
+        return;
+      }
+
       const incomingSignature = buildSharedSignature({
         library: sharedState.library,
         playback: sharedState.playback,
@@ -188,12 +208,15 @@ export function App() {
       }
 
       applyingRemoteStateRef.current = true;
-      replaceLibrary(sharedState.library);
-      setLoadedPlaylists(sharedState.playback.loadedPlaylists);
-      setVolume(sharedState.playback.masterVolume);
-      setIsMuted(sharedState.playback.isMuted);
-      lastSharedSignatureRef.current = incomingSignature;
-      applyingRemoteStateRef.current = false;
+      try {
+        replaceLibrary(sharedState.library);
+        setLoadedPlaylists(sharedState.playback.loadedPlaylists);
+        setVolume(sharedState.playback.masterVolume);
+        setIsMuted(sharedState.playback.isMuted);
+        lastSharedSignatureRef.current = incomingSignature;
+      } finally {
+        applyingRemoteStateRef.current = false;
+      }
     };
 
     OBR.onReady(() => {
@@ -278,6 +301,14 @@ export function App() {
       return;
     }
 
+    const now = Date.now();
+    const waitUntil = Math.max(
+      now + SYNC_WRITE_DEBOUNCE_MS,
+      lastSyncWriteAtRef.current + SYNC_MIN_WRITE_INTERVAL_MS,
+      nextSyncWriteAllowedAtRef.current,
+    );
+    const waitMs = Math.max(waitUntil - now, 0);
+
     syncWriteTimerRef.current = window.setTimeout(() => {
       syncWriteTimerRef.current = null;
       const pendingSharedState = pendingSharedStateRef.current;
@@ -294,12 +325,25 @@ export function App() {
       void OBR.room
         .setMetadata({ [ROOM_SYNC_KEY]: pendingSharedState })
         .then(() => {
+          lastSyncWriteAtRef.current = Date.now();
           lastSharedSignatureRef.current = nextSignature;
+          nextSyncWriteAllowedAtRef.current = lastSyncWriteAtRef.current;
         })
-        .catch(() => {
-          // Ignore transient metadata write failures; future local edits will retry.
+        .catch((error: unknown) => {
+          const message = typeof error === "string"
+            ? error
+            : error instanceof Error
+              ? error.message
+              : "";
+
+          if (message.includes("4003") || message.toLowerCase().includes("rate")) {
+            nextSyncWriteAllowedAtRef.current = Date.now() + SYNC_RATE_LIMIT_BACKOFF_MS;
+          }
+
+          // Keep pending data queued; next local change will attempt a write again.
+          pendingSharedStateRef.current = pendingSharedState;
         });
-    }, SYNC_WRITE_DEBOUNCE_MS);
+    }, waitMs);
   }, [isGm, isMuted, isOwlbearReady, library, loadedPlaylists, volume]);
 
   const activeNode = useMemo(() => {
@@ -652,7 +696,7 @@ export function App() {
   const isLoadedPanelOpen = isPlayerView || showLoadedTracks;
 
   return (
-    <div className="container">
+    <div className={`container ${isPlayerView ? "player-view" : ""}`}>
       
       {!isPlayerView ? (
         <>
@@ -771,7 +815,6 @@ export function App() {
         </>
       ) : null}
 
-      {isPlayerView ? <div className="player-footer-spacer" /> : null}
       <footer className="audioplayer-container">
         <div className="footer-main-row">
           <div className="song-name-container">
