@@ -10,8 +10,8 @@
     "title": "Odyssey Music",
     "icon": "https://limonety995-maker.github.io/odyssey-musicbot/icon.svg?v=0.3.0",
     "popover": "https://limonety995-maker.github.io/odyssey-musicbot/index.html?v=0.3.0",
-    "width": 480,
-    "height": 720
+    "width": 620,
+    "height": 760
   },
   "background_url": "https://limonety995-maker.github.io/odyssey-musicbot/background.html?v=0.3.0",
   "permissions": [
