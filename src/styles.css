@@ -553,3 +553,11 @@ ul {
   pointer-events: none;
   inset: -9999px;
 }
+
+.sprite-definitions {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+

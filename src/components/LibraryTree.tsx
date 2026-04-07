@@ -33,7 +33,7 @@ export function TreeBranch({
               className="icon node-icon playlist-icon-default"
               style={{ fill: node.iconColor }}
             >
-              <use href={`#icon-folder`} />
+              <use xlinkHref={`#icon-folder`} />
             </svg>
             <svg
               width="72"
@@ -41,7 +41,7 @@ export function TreeBranch({
               className="icon node-icon playlist-icon-hover"
               style={{ fill: node.iconColor }}
             >
-              <use href={`#icon-playfolder`} />
+              <use xlinkHref={`#icon-playfolder`} />
             </svg>
             {node.name}
           </button>
@@ -52,7 +52,7 @@ export function TreeBranch({
             aria-label={`Edit playlist ${node.name}`}
           >
             <svg width="18" height="18" className="icon">
-              <use href={`#icon-edit`} />
+              <use xlinkHref={`#icon-edit`} />
             </svg>
           </button>
         </div>
@@ -73,7 +73,7 @@ export function TreeBranch({
           className="icon node-icon"
           style={{ fill: node.iconColor }}
         >
-          <use href={`#icon-folder`} />
+          <use xlinkHref={`#icon-folder`} />
         </svg>
         {node.name}
       </button>
