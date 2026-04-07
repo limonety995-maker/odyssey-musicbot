@@ -12,11 +12,11 @@ const outDir = path.join(__dirname, "dist", "extension");
 const watchMode = process.argv.includes("--watch");
 
 const staticFiles = [
-  "manifest.json",
-  "index.html",
-  "background.html",
-  "styles.css",
-  "icon.svg",
+  { from: "manifest.json", to: "manifest.json" },
+  { from: "index.prod.html", to: "index.html" },
+  { from: "background.html", to: "background.html" },
+  { from: "styles.css", to: "styles.css" },
+  { from: "icon.svg", to: "icon.svg" },
 ];
 
 const bundleOptions = {
@@ -41,7 +41,7 @@ function copyStaticFiles() {
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(path.join(outDir, "assets"), { recursive: true });
   for (const file of staticFiles) {
-    copyFileSync(path.join(srcDir, file), path.join(outDir, file));
+    copyFileSync(path.join(srcDir, file.from), path.join(outDir, file.to));
   }
 }
 
