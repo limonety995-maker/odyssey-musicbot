@@ -35,6 +35,7 @@ type SharedRoomState = {
 };
 
 const ROOM_SYNC_KEY = "odyssey-music/sync-v1";
+const SYNC_WRITE_DEBOUNCE_MS = 300;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
@@ -76,6 +77,16 @@ function asSharedRoomState(value: unknown): SharedRoomState | null {
   }
 
   return value as SharedRoomState;
+}
+
+function buildSharedSignature(input: {
+  library: LibraryState;
+  playback: SharedRoomState["playback"];
+}) {
+  return JSON.stringify({
+    library: input.library,
+    playback: input.playback,
+  });
 }
 
 type NodeModalMode =
@@ -150,7 +161,9 @@ export function App() {
   const [isGm, setIsGm] = useState(true);
   const applyingRemoteStateRef = useRef(false);
   const playerIdRef = useRef<string>("local");
-  const lastWrittenStateRef = useRef<string>("");
+  const lastSharedSignatureRef = useRef<string>("");
+  const pendingSharedStateRef = useRef<SharedRoomState | null>(null);
+  const syncWriteTimerRef = useRef<number | null>(null);
   
   useEffect(() => {
     const handleHashChange = () => {
@@ -166,12 +179,20 @@ export function App() {
     let unsubscribeRoomMetadata: (() => void) | undefined;
 
     const applySharedState = (sharedState: SharedRoomState) => {
+      const incomingSignature = buildSharedSignature({
+        library: sharedState.library,
+        playback: sharedState.playback,
+      });
+      if (incomingSignature === lastSharedSignatureRef.current) {
+        return;
+      }
+
       applyingRemoteStateRef.current = true;
       replaceLibrary(sharedState.library);
       setLoadedPlaylists(sharedState.playback.loadedPlaylists);
       setVolume(sharedState.playback.masterVolume);
       setIsMuted(sharedState.playback.isMuted);
-      lastWrittenStateRef.current = JSON.stringify(sharedState);
+      lastSharedSignatureRef.current = incomingSignature;
       applyingRemoteStateRef.current = false;
     };
 
@@ -208,6 +229,10 @@ export function App() {
             return;
           }
 
+          if (nextShared.updatedBy === playerIdRef.current) {
+            return;
+          }
+
           applySharedState(nextShared);
         });
       })();
@@ -216,6 +241,10 @@ export function App() {
     return () => {
       cancelled = true;
       unsubscribeRoomMetadata?.();
+      if (syncWriteTimerRef.current !== null) {
+        window.clearTimeout(syncWriteTimerRef.current);
+        syncWriteTimerRef.current = null;
+      }
     };
   }, [replaceLibrary]);
 
@@ -236,12 +265,41 @@ export function App() {
       updatedBy: playerIdRef.current,
     };
 
-    const serialized = JSON.stringify(nextShared);
-    if (serialized === lastWrittenStateRef.current) {
+    const signature = buildSharedSignature({
+      library: nextShared.library,
+      playback: nextShared.playback,
+    });
+    if (signature === lastSharedSignatureRef.current) {
       return;
     }
-    lastWrittenStateRef.current = serialized;
-    void OBR.room.setMetadata({ [ROOM_SYNC_KEY]: nextShared });
+
+    pendingSharedStateRef.current = nextShared;
+    if (syncWriteTimerRef.current !== null) {
+      return;
+    }
+
+    syncWriteTimerRef.current = window.setTimeout(() => {
+      syncWriteTimerRef.current = null;
+      const pendingSharedState = pendingSharedStateRef.current;
+      if (!pendingSharedState || !isGm || !isOwlbearReady) {
+        return;
+      }
+
+      pendingSharedStateRef.current = null;
+      const nextSignature = buildSharedSignature({
+        library: pendingSharedState.library,
+        playback: pendingSharedState.playback,
+      });
+
+      void OBR.room
+        .setMetadata({ [ROOM_SYNC_KEY]: pendingSharedState })
+        .then(() => {
+          lastSharedSignatureRef.current = nextSignature;
+        })
+        .catch(() => {
+          // Ignore transient metadata write failures; future local edits will retry.
+        });
+    }, SYNC_WRITE_DEBOUNCE_MS);
   }, [isGm, isMuted, isOwlbearReady, library, loadedPlaylists, volume]);
 
   const activeNode = useMemo(() => {
