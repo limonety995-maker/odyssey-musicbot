@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - local_test
   workflow_dispatch:
 
 permissions:
@@ -19,20 +20,67 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v4
+        with:
+          ref: main
+          path: site-main
+
+      - name: Checkout local_test
+        uses: actions/checkout@v4
+        with:
+          ref: local_test
+          path: site-local-test
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: |
+            site-main/package-lock.json
+            site-local-test/package-lock.json
 
-      - name: Install dependencies
+      - name: Install main dependencies
+        working-directory: site-main
         run: npm ci
 
-      - name: Build extension
+      - name: Build main extension
+        working-directory: site-main
         run: npm run build
+
+      - name: Install local_test dependencies
+        working-directory: site-local-test
+        run: npm ci
+
+      - name: Build local_test extension
+        working-directory: site-local-test
+        run: npm run build
+
+      - name: Prepare Pages artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf pages-artifact
+          mkdir -p pages-artifact/local_test
+          cp -R site-main/dist/extension/. pages-artifact/
+          cp -R site-local-test/dist/extension/. pages-artifact/local_test/
+          node <<'NODE'
+          const fs = require("node:fs");
+          const manifestPath = "pages-artifact/local_test/manifest.json";
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          const version = manifest.version || "local-test";
+          const baseUrl = "https://limonety995-maker.github.io/odyssey-musicbot/local_test";
+          manifest.name = `${manifest.name} (local_test)`;
+          manifest.icon = `${baseUrl}/icon.svg?v=${version}`;
+          if (manifest.action) {
+            manifest.action.title = `${manifest.action.title || "Sync Music"} local_test`;
+            manifest.action.icon = `${baseUrl}/icon.svg?v=${version}`;
+            manifest.action.popover = `${baseUrl}/index.html?v=${version}`;
+          }
+          manifest.background_url = `${baseUrl}/background.html?v=${version}`;
+          fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
@@ -40,7 +88,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist/extension
+          path: pages-artifact
 
   deploy:
     environment:
