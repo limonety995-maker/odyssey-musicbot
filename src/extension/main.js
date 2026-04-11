@@ -496,13 +496,10 @@ async function unlockLocalAudio() {
     {
       type: "prime-local-audio",
       roomRuntime: state.runtime,
-      roomState: state.roomState,
+      resumeIfPlaying: true,
     },
     { destination: "LOCAL" },
   );
-  if (state.roomState.transport.status === TRANSPORT_PLAYING) {
-    await retryLocalAudio();
-  }
 }
 
 function syncLocalOutputVolume(volume) {

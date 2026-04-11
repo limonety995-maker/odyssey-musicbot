@@ -659,11 +659,17 @@ async function primeLocalAudio(runtimeOverride = null) {
   await ensureEntryPrepared(slot, entry, entry.desiredPositionSec, "cue");
 
   try {
+    if (typeof slot.player.mute === "function") {
+      slot.player.mute();
+    }
     slot.player.setVolume(0);
     slot.player.playVideo();
     await wait(250);
     slot.player.pauseVideo();
     slot.player.seekTo(entry.desiredPositionSec, true);
+    if (typeof slot.player.unMute === "function") {
+      slot.player.unMute();
+    }
     applyEntryVolume(slot, entry.effectiveVolume);
     await publishClientStatus({
       audioPrimed: true,
@@ -806,8 +812,15 @@ OBR.onReady(async () => {
       return;
     }
     if (event.data?.type === "prime-local-audio") {
-      applyRuntime(event.data?.roomRuntime || event.data?.roomState || currentRuntime)
-        .then(() => primeLocalAudio(event.data?.roomRuntime || event.data?.roomState || currentRuntime))
+      const runtimeOverride = ensureRoomRuntime(event.data?.roomRuntime || currentRuntime);
+      applyRuntime(runtimeOverride)
+        .then(() => primeLocalAudio(runtimeOverride))
+        .then(() => {
+          if (event.data?.resumeIfPlaying === false || runtimeOverride.transport.status !== TRANSPORT_PLAYING) {
+            return null;
+          }
+          return retryLocalAudio();
+        })
         .catch(() => {
           // Ignore local prime failures.
         });
