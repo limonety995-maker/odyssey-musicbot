@@ -9,8 +9,8 @@ import {
   ROOM_SYNC_KEY,
   asSharedRoomState,
   buildSharedSignature,
-  isLibraryStateLike,
   type LoadedPlaylist,
+  type SharedLoadedPlaylist,
   type SharedRoomState,
 } from "./sharedSync";
 import spriteUrl from "./sprite/sprite.svg";
@@ -76,6 +76,10 @@ function getStoredPlayerVolume() {
   return Number.isFinite(parsedVolume) ? clampVolume(parsedVolume) : 100;
 }
 
+function toLocalLoadedPlaylists(playlists: SharedLoadedPlaylist[]): LoadedPlaylist[] {
+  return playlists.map(({ tracks: _tracks, ...playlist }) => playlist);
+}
+
 function getParentFolderId(
   node: LibraryNode | null,
   getNode: (nodeId: NodeId) => LibraryNode | null,
@@ -98,16 +102,17 @@ export function App() {
     getTrackCount,
     getTracksForPlaylist,
     library,
-    replaceLibrary,
     removeTrackFromPlaylist,
     updateNode,
   } = useLibraryStore();
   const [route, setRoute] = useState<RouteState>(() => parseRouteFromHash());
   const [loadedPlaylists, setLoadedPlaylists] = useState<LoadedPlaylist[]>([]);
+  const [remoteLoadedPlaylists, setRemoteLoadedPlaylists] = useState<SharedLoadedPlaylist[]>([]);
   const [showLoadedTracks, setShowLoadedTracks] = useState(false);
   const [volume, setVolume] = useState(70);
   const [playerVolume, setPlayerVolume] = useState(getStoredPlayerVolume);
   const [isMuted, setIsMuted] = useState(false);
+  const [syncError, setSyncError] = useState("");
   const [nodeModal, setNodeModal] = useState<NodeModalMode>({ type: "closed" });
   const [nodeNameDraft, setNodeNameDraft] = useState("");
   const [nodeColorDraft, setNodeColorDraft] = useState("#f4b463");
@@ -136,22 +141,15 @@ export function App() {
     let unsubscribeRoomMetadata: (() => void) | undefined;
 
     const applySharedState = (sharedState: SharedRoomState) => {
-      if (!isLibraryStateLike(sharedState.library)) {
-        return;
-      }
-
-      const incomingSignature = buildSharedSignature({
-        library: sharedState.library,
-        playback: sharedState.playback,
-      });
+      const incomingSignature = buildSharedSignature(sharedState.playback);
       if (incomingSignature === lastSharedSignatureRef.current) {
         return;
       }
 
       applyingRemoteStateRef.current = true;
       try {
-        replaceLibrary(sharedState.library);
-        setLoadedPlaylists(sharedState.playback.loadedPlaylists);
+        setRemoteLoadedPlaylists(sharedState.playback.loadedPlaylists);
+        setLoadedPlaylists(toLocalLoadedPlaylists(sharedState.playback.loadedPlaylists));
         setVolume(sharedState.playback.masterVolume);
         setIsMuted(sharedState.playback.isMuted);
         lastSharedSignatureRef.current = incomingSignature;
@@ -206,29 +204,46 @@ export function App() {
         syncWriteTimerRef.current = null;
       }
     };
-  }, [replaceLibrary]);
+  }, []);
 
   useEffect(() => {
     if (!isOwlbearReady || !isGm || applyingRemoteStateRef.current) {
       return;
     }
 
+    const sharedLoadedPlaylists = loadedPlaylists.map((playlist): SharedLoadedPlaylist => {
+      const playlistNode = library.nodesById[playlist.id];
+      const tracks = playlistNode?.type === "playlist"
+        ? playlistNode.trackIds
+            .map((trackId) => library.tracksById[trackId])
+            .filter(Boolean)
+            .map((track) => ({
+              id: track.id,
+              title: track.title,
+              url: track.url,
+            }))
+        : [];
+
+      return {
+        ...playlist,
+        tracks,
+      };
+    });
+
+    const playback: SharedRoomState["playback"] = {
+      loadedPlaylists: sharedLoadedPlaylists,
+      masterVolume: volume,
+      isMuted,
+    };
+
     const nextShared: SharedRoomState = {
-      version: 1,
-      library,
-      playback: {
-        loadedPlaylists,
-        masterVolume: volume,
-        isMuted,
-      },
+      version: 2,
+      playback,
       updatedAt: Date.now(),
       updatedBy: playerIdRef.current,
     };
 
-    const signature = buildSharedSignature({
-      library: nextShared.library,
-      playback: nextShared.playback,
-    });
+    const signature = buildSharedSignature(nextShared.playback);
     if (signature === lastSharedSignatureRef.current) {
       return;
     }
@@ -254,14 +269,12 @@ export function App() {
       }
 
       pendingSharedStateRef.current = null;
-      const nextSignature = buildSharedSignature({
-        library: pendingSharedState.library,
-        playback: pendingSharedState.playback,
-      });
+      const nextSignature = buildSharedSignature(pendingSharedState.playback);
 
       void OBR.room
         .setMetadata({ [ROOM_SYNC_KEY]: pendingSharedState })
         .then(() => {
+          setSyncError("");
           lastSyncWriteAtRef.current = Date.now();
           lastSharedSignatureRef.current = nextSignature;
           nextSyncWriteAllowedAtRef.current = lastSyncWriteAtRef.current;
@@ -278,6 +291,9 @@ export function App() {
           }
 
           // Keep pending data queued; next local change will attempt a write again.
+          setSyncError(
+            "Music sync could not be shared to the room. Try unloading playlists or using fewer tracks.",
+          );
           pendingSharedStateRef.current = pendingSharedState;
         });
     }, waitMs);
@@ -352,6 +368,10 @@ export function App() {
     : [];
 
   useEffect(() => {
+    if (!isGm) {
+      return;
+    }
+
     setLoadedPlaylists((current) => {
       let changed = false;
       const next = current
@@ -382,7 +402,7 @@ export function App() {
 
       return !changed && next.length === current.length ? current : next;
     });
-  }, [library.nodesById, library.tracksById]);
+  }, [isGm, library.nodesById, library.tracksById]);
 
   function navigateToNode(nodeId: NodeId) {
     const node = getNode(nodeId);
@@ -543,23 +563,38 @@ export function App() {
     closeNodeModal();
   }
 
-  const primaryPlaylist = loadedPlaylists[0] ?? null;
-  const primaryPlaylistCandidate = primaryPlaylist
-    ? library.nodesById[primaryPlaylist.id]
-    : null;
-  const primaryPlaylistNode =
-    primaryPlaylistCandidate?.type === "playlist"
-      ? primaryPlaylistCandidate
-      : null;
-  const primaryTrackId =
-    primaryPlaylistNode?.trackIds[primaryPlaylist.currentTrackIndex] ?? null;
-  const primaryTrackTitle = primaryTrackId
-    ? library.tracksById[primaryTrackId]?.title
-    : null;
-  const isDiskSpinning = loadedPlaylists.some((playlist) => playlist.isPlaying);
+  const isPlayerView = isOwlbearReady && !isGm;
+  const localSharedLoadedPlaylists = useMemo(
+    () =>
+      loadedPlaylists.map((playlist): SharedLoadedPlaylist => {
+        const playlistNode = library.nodesById[playlist.id];
+        const tracks = playlistNode?.type === "playlist"
+          ? playlistNode.trackIds
+              .map((trackId) => library.tracksById[trackId])
+              .filter(Boolean)
+              .map((track) => ({
+                id: track.id,
+                title: track.title,
+                url: track.url,
+              }))
+          : [];
+
+        return {
+          ...playlist,
+          tracks,
+        };
+      }),
+    [library.nodesById, library.tracksById, loadedPlaylists],
+  );
+  const displayedLoadedPlaylists = isPlayerView
+    ? remoteLoadedPlaylists
+    : localSharedLoadedPlaylists;
+  const primaryPlaylist = displayedLoadedPlaylists[0] ?? null;
+  const primaryTrackTitle =
+    primaryPlaylist?.tracks[primaryPlaylist.currentTrackIndex]?.title ?? null;
+  const isDiskSpinning = displayedLoadedPlaylists.some((playlist) => playlist.isPlaying);
   const canCreatePlaylist =
     route.type === "folder" && activeNode?.type === "folder";
-  const isPlayerView = isOwlbearReady && !isGm;
   const isLoadedPanelOpen = showLoadedTracks;
   const displayedVolume = isPlayerView ? playerVolume : isMuted ? 0 : volume;
 
@@ -772,10 +807,10 @@ export function App() {
                 {primaryTrackTitle ?? primaryPlaylist?.name ?? activePlaylist?.name ?? "Song name"}
               </p>
               <p className="muted">
-                {loadedPlaylists.length > 0
+                {displayedLoadedPlaylists.length > 0
                   ? primaryPlaylist
-                    ? `${primaryPlaylist.name} - ${loadedPlaylists.length} playlist${loadedPlaylists.length === 1 ? "" : "s"} loaded`
-                    : `${loadedPlaylists.length} playlist${loadedPlaylists.length === 1 ? "" : "s"} loaded`
+                    ? `${primaryPlaylist.name} - ${displayedLoadedPlaylists.length} playlist${displayedLoadedPlaylists.length === 1 ? "" : "s"} loaded`
+                    : `${displayedLoadedPlaylists.length} playlist${displayedLoadedPlaylists.length === 1 ? "" : "s"} loaded`
                   : "Nothing loaded"}
               </p>
             </div>
@@ -847,22 +882,18 @@ export function App() {
             />
           </div>
         </div>
+        {!isPlayerView && syncError ? (
+          <p className="form-error">{syncError}</p>
+        ) : null}
         {isLoadedPanelOpen ? (
           <div className="loaded-track-panel">
-            {loadedPlaylists.length > 0 ? (
+            {displayedLoadedPlaylists.length > 0 ? (
               <>
                 <ul className="loaded-track-list">
-                  {loadedPlaylists.map((playlist) => {
-                    const playlistNode = library.nodesById[playlist.id];
-                    const trackIds =
-                      playlistNode && playlistNode.type === "playlist"
-                        ? playlistNode.trackIds
-                        : [];
-                    const currentTrackId =
-                      trackIds[playlist.currentTrackIndex] ?? null;
-                    const currentTrackTitle = currentTrackId
-                      ? library.tracksById[currentTrackId]?.title
-                      : null;
+                  {displayedLoadedPlaylists.map((playlist) => {
+                    const trackCount = playlist.tracks.length;
+                    const currentTrackTitle =
+                      playlist.tracks[playlist.currentTrackIndex]?.title ?? null;
 
                     return (
                       <li
@@ -883,7 +914,7 @@ export function App() {
                                   className="icon-button playlist-inline-control"
                                   type="button"
                                   onClick={() => stepPlaylistTrack(playlist.id, -1)}
-                                  disabled={trackIds.length === 0}
+                                  disabled={trackCount === 0}
                                 >
                                   <svg width="16" height="16" className="icon">
                                     <use xlinkHref={`${spriteHref}#icon-back`}></use>
@@ -947,7 +978,7 @@ export function App() {
                                   className="icon-button playlist-inline-control"
                                   type="button"
                                   onClick={() => stepPlaylistTrack(playlist.id, 1)}
-                                  disabled={trackIds.length === 0}
+                                  disabled={trackCount === 0}
                                 >
                                   <svg width="16" height="16" className="icon">
                                     <use xlinkHref={`${spriteHref}#icon-next`}></use>

@@ -1,4 +1,4 @@
-import type { LibraryState, NodeId } from "./types";
+import type { NodeId, TrackId } from "./types";
 
 export type LoadedPlaylist = {
   id: NodeId;
@@ -10,11 +10,20 @@ export type LoadedPlaylist = {
   restartToken: number;
 };
 
+export type SharedTrack = {
+  id: TrackId;
+  title: string;
+  url: string;
+};
+
+export type SharedLoadedPlaylist = LoadedPlaylist & {
+  tracks: SharedTrack[];
+};
+
 export type SharedRoomState = {
-  version: 1;
-  library: LibraryState;
+  version: 2;
   playback: {
-    loadedPlaylists: LoadedPlaylist[];
+    loadedPlaylists: SharedLoadedPlaylist[];
     masterVolume: number;
     isMuted: boolean;
   };
@@ -22,7 +31,7 @@ export type SharedRoomState = {
   updatedBy: string;
 };
 
-export const ROOM_SYNC_KEY = "odyssey-music/sync-v1";
+export const ROOM_SYNC_KEY = "odyssey-music/sync-v2";
 export const PLAYER_LOCAL_VOLUME_KEY = "odyssey-music/player-local-volume";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -40,8 +49,21 @@ function isLoadedPlaylist(value: unknown): value is LoadedPlaylist {
     && typeof value.restartToken === "number";
 }
 
+function isSharedTrack(value: unknown): value is SharedTrack {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.title === "string"
+    && typeof value.url === "string";
+}
+
+function isSharedLoadedPlaylist(value: unknown): value is SharedLoadedPlaylist {
+  return isLoadedPlaylist(value)
+    && Array.isArray(value.tracks)
+    && value.tracks.every(isSharedTrack);
+}
+
 export function asSharedRoomState(value: unknown): SharedRoomState | null {
-  if (!isRecord(value) || value.version !== 1) {
+  if (!isRecord(value) || value.version !== 2) {
     return null;
   }
 
@@ -52,10 +74,9 @@ export function asSharedRoomState(value: unknown): SharedRoomState | null {
 
   if (
     !Array.isArray(playback.loadedPlaylists)
-    || !playback.loadedPlaylists.every(isLoadedPlaylist)
+    || !playback.loadedPlaylists.every(isSharedLoadedPlaylist)
     || typeof playback.masterVolume !== "number"
     || typeof playback.isMuted !== "boolean"
-    || !isRecord(value.library)
     || typeof value.updatedAt !== "number"
     || typeof value.updatedBy !== "string"
   ) {
@@ -65,24 +86,6 @@ export function asSharedRoomState(value: unknown): SharedRoomState | null {
   return value as SharedRoomState;
 }
 
-export function isLibraryStateLike(value: unknown): value is LibraryState {
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  if (!Array.isArray(value.rootIds) || !isRecord(value.nodesById) || !isRecord(value.tracksById)) {
-    return false;
-  }
-
-  return value.rootIds.every((id) => typeof id === "string");
-}
-
-export function buildSharedSignature(input: {
-  library: LibraryState;
-  playback: SharedRoomState["playback"];
-}) {
-  return JSON.stringify({
-    library: input.library,
-    playback: input.playback,
-  });
+export function buildSharedSignature(playback: SharedRoomState["playback"]) {
+  return JSON.stringify(playback);
 }
