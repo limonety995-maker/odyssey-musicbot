@@ -39,8 +39,11 @@ const ROOM_SYNC_KEY = "odyssey-music/sync-v1";
 const SYNC_WRITE_DEBOUNCE_MS = 1200;
 const SYNC_MIN_WRITE_INTERVAL_MS = 1200;
 const SYNC_RATE_LIMIT_BACKOFF_MS = 5000;
+const ACTION_WIDTH = 585;
+const GM_POPOVER_HEIGHT = 400;
 const PLAYER_COLLAPSED_HEIGHT = 52;
-const PLAYER_EXPANDED_HEIGHT = 210;
+const PLAYER_EMPTY_EXPANDED_HEIGHT = 88;
+const PLAYER_EXPANDED_HEIGHT = 150;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
@@ -709,14 +712,21 @@ export function App() {
   }, [isPlayerView]);
 
   useEffect(() => {
-    if (!isPlayerView) {
+    if (!isOwlbearReady) {
       return;
     }
 
+    void OBR.action.setWidth(ACTION_WIDTH);
     void OBR.action.setHeight(
-      showLoadedTracks ? PLAYER_EXPANDED_HEIGHT : PLAYER_COLLAPSED_HEIGHT,
+      isPlayerView
+        ? showLoadedTracks
+          ? loadedPlaylists.length > 0
+            ? PLAYER_EXPANDED_HEIGHT
+            : PLAYER_EMPTY_EXPANDED_HEIGHT
+          : PLAYER_COLLAPSED_HEIGHT
+        : GM_POPOVER_HEIGHT,
     );
-  }, [isPlayerView, showLoadedTracks]);
+  }, [isOwlbearReady, isPlayerView, loadedPlaylists.length, showLoadedTracks]);
 
   return (
     <div className={`container ${isPlayerView ? "player-view" : ""}`}>
