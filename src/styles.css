@@ -46,12 +46,14 @@ body.player-view-body {
   height: auto;
   min-height: auto;
   background: transparent;
+  overflow: hidden;
 }
 
 .container.player-view .audioplayer-container {
   border-radius: 8px;
   padding: 6px 12px;
   gap: 4px;
+  min-height: 40px;
 }
 
 .container.player-view .player-panel-toggle {
@@ -93,6 +95,24 @@ body.player-view-body {
 
 .container.player-view .volume-slider {
   width: 150px;
+}
+
+.container.player-view .loaded-track-panel {
+  max-height: 92px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.container.player-view .loaded-track-list {
+  gap: 6px;
+}
+
+.container.player-view .loaded-playlist-meta {
+  gap: 10px;
+}
+
+.container.player-view .playlist-controls-row {
+  display: none;
 }
 
 .navigation {
