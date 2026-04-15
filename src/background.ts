@@ -7,12 +7,13 @@ import {
   type SharedRoomState,
 } from "./sharedSync";
 import { ensureYouTubeApi, extractVideoId, type YTApi, type YTPlayer } from "./youtube";
+import { onLocalVolumeChange, readLocalVolume } from "./localPlayerSettings";
 
 const statusElement = document.getElementById("background-status");
 const GM_POPOVER_WIDTH = 585;
 const GM_POPOVER_HEIGHT = 400;
 const PLAYER_POPOVER_WIDTH = 585;
-const PLAYER_POPOVER_HEIGHT = 55;
+const PLAYER_POPOVER_HEIGHT = 52;
 
 type PlayableEntry = {
   playlistId: string;
@@ -29,6 +30,7 @@ let latestSharedState: SharedRoomState | null = null;
 let latestSignature = "";
 let currentRole = "PLAYER";
 let playerId = "background";
+let localVolume = readLocalVolume();
 
 function setStatus(message: string) {
   if (statusElement) {
@@ -71,7 +73,9 @@ function getPlayableEntries(sharedState: SharedRoomState): PlayableEntry[] {
         isPlaying: playlist.isPlaying,
         volume: sharedState.playback.isMuted
           ? 0
-          : Math.round((playlist.volume * sharedState.playback.masterVolume) / 100),
+          : Math.round(
+              (playlist.volume * sharedState.playback.masterVolume * localVolume) / 10000,
+            ),
         restartToken: playlist.restartToken,
       };
     })
@@ -287,5 +291,13 @@ OBR.onReady(() => {
   });
   OBR.player.onChange(() => {
     void applyActionSize();
+  });
+
+  onLocalVolumeChange((nextLocalVolume) => {
+    localVolume = nextLocalVolume;
+    if (latestSharedState) {
+      latestSignature = "";
+      applySharedState(latestSharedState);
+    }
   });
 });
