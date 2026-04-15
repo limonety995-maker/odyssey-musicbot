@@ -46,22 +46,28 @@ body.player-view-body {
   height: auto;
   min-height: auto;
   background: transparent;
+  overflow: hidden;
 }
 
 .container.player-view .audioplayer-container {
-  border-radius: 12px;
-  padding: 8px 12px;
-  gap: 6px;
+  border-radius: 8px;
+  padding: 6px 12px;
+  gap: 4px;
+  min-height: 40px;
 }
 
-.container.player-view .player-static-toggle {
-  pointer-events: none;
-  cursor: default;
+.container.player-view .player-panel-toggle {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .container.player-view .footer-main-row {
   flex-wrap: nowrap;
-  gap: 10px;
+  gap: 8px;
+  min-height: 40px;
 }
 
 .container.player-view .song-name-container {
@@ -84,7 +90,29 @@ body.player-view-body {
 }
 
 .container.player-view .volume-controls {
-  gap: 8px;
+  gap: 6px;
+}
+
+.container.player-view .volume-slider {
+  width: 150px;
+}
+
+.container.player-view .loaded-track-panel {
+  max-height: 92px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.container.player-view .loaded-track-list {
+  gap: 6px;
+}
+
+.container.player-view .loaded-playlist-meta {
+  gap: 10px;
+}
+
+.container.player-view .playlist-controls-row {
+  display: none;
 }
 
 .navigation {
@@ -499,7 +527,7 @@ ul {
 
 
 .loaded-track-panel {
-  border-radius: 12px;
+  border-radius: 8px;
   background-color: #221d37;
   padding: 12px;
 }
