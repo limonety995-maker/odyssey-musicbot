@@ -49,19 +49,23 @@ body.player-view-body {
 }
 
 .container.player-view .audioplayer-container {
-  border-radius: 12px;
-  padding: 8px 12px;
-  gap: 6px;
+  border-radius: 8px;
+  padding: 6px 12px;
+  gap: 4px;
 }
 
-.container.player-view .player-static-toggle {
-  pointer-events: none;
-  cursor: default;
+.container.player-view .player-panel-toggle {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .container.player-view .footer-main-row {
   flex-wrap: nowrap;
-  gap: 10px;
+  gap: 8px;
+  min-height: 40px;
 }
 
 .container.player-view .song-name-container {
@@ -84,7 +88,11 @@ body.player-view-body {
 }
 
 .container.player-view .volume-controls {
-  gap: 8px;
+  gap: 6px;
+}
+
+.container.player-view .volume-slider {
+  width: 150px;
 }
 
 .navigation {
@@ -499,7 +507,7 @@ ul {
 
 
 .loaded-track-panel {
-  border-radius: 12px;
+  border-radius: 8px;
   background-color: #221d37;
   padding: 12px;
 }
