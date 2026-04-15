@@ -604,9 +604,21 @@ export function App() {
     }
 
     const resizePlayerPopover = () => {
-      const measuredHeight = playerFooterRef.current?.scrollHeight ?? PLAYER_COLLAPSED_HEIGHT;
+      const footer = playerFooterRef.current;
+      const footerStyles = footer ? window.getComputedStyle(footer) : null;
+      const footerPadding =
+        (Number.parseFloat(footerStyles?.paddingTop ?? "0") || 0)
+        + (Number.parseFloat(footerStyles?.paddingBottom ?? "0") || 0);
+      const footerGap = Number.parseFloat(footerStyles?.rowGap ?? footerStyles?.gap ?? "0") || 0;
+      const contentHeight = footer
+        ? Array.from(footer.children).reduce(
+            (totalHeight, child, index) =>
+              totalHeight + child.getBoundingClientRect().height + (index > 0 ? footerGap : 0),
+            footerPadding,
+          )
+        : PLAYER_COLLAPSED_HEIGHT;
       const nextHeight = showLoadedTracks
-        ? Math.min(Math.ceil(measuredHeight), PLAYER_MAX_EXPANDED_HEIGHT)
+        ? Math.min(Math.ceil(contentHeight), PLAYER_MAX_EXPANDED_HEIGHT)
         : PLAYER_COLLAPSED_HEIGHT;
 
       void OBR.action.setHeight(nextHeight);

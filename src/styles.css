@@ -25,6 +25,11 @@ body.player-view-body #app {
   min-height: 0;
 }
 
+body.player-view-body #app {
+  display: block;
+  overflow: hidden;
+}
+
 .icon {
   fill: #ffffff;
 }
@@ -49,15 +54,21 @@ body.player-view-body #app {
 }
 
 .container.player-view {
+  display: block;
   height: auto;
-  min-height: auto;
+  min-height: 0;
   background: transparent;
+  overflow: hidden;
 }
 
 .container.player-view .audioplayer-container {
   border-radius: 8px;
   padding: 6px 10px;
   gap: 8px;
+  box-sizing: border-box;
+  flex: none;
+  height: auto;
+  min-height: 0;
 }
 
 .container.player-view .footer-main-row {
