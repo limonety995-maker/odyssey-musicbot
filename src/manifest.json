@@ -17,7 +17,7 @@
   "permissions": [
     {
       "name": "autoplay",
-      "reason": "Needed so the extension can eventually start synchronized music for all players."
+      "reason": "Needed so the extension can start synchronized music for all players."
     }
   ]
 }
