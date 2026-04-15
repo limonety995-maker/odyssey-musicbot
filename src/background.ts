@@ -28,6 +28,7 @@ const currentVideoIdsByPlaylistId: Record<string, string> = {};
 const restartTokensByPlaylistId: Record<string, number> = {};
 let latestSharedState: SharedRoomState | null = null;
 let latestSignature = "";
+let latestPlayableSignature = "";
 let currentRole = "PLAYER";
 let playerId = "background";
 
@@ -77,6 +78,10 @@ function getPlayableEntries(sharedState: SharedRoomState): PlayableEntry[] {
       };
     })
     .filter((entry): entry is PlayableEntry => entry !== null);
+}
+
+function buildPlayableSignature(entries: PlayableEntry[]) {
+  return JSON.stringify(entries);
 }
 
 function getMountNode(playlistId: string) {
@@ -212,6 +217,12 @@ function applySharedState(sharedState: SharedRoomState) {
   latestSharedState = sharedState;
   latestSignature = signature;
   const entries = getPlayableEntries(sharedState);
+  const playableSignature = buildPlayableSignature(entries);
+  if (playableSignature === latestPlayableSignature) {
+    return;
+  }
+
+  latestPlayableSignature = playableSignature;
   void ensureYouTubeApi().then((YT) => {
     if (!YT?.Player) {
       setStatus("YouTube audio engine unavailable.");
@@ -229,6 +240,7 @@ function reapplyLatestPlayback() {
   }
 
   const entries = getPlayableEntries(latestSharedState);
+  latestPlayableSignature = buildPlayableSignature(entries);
   void ensureYouTubeApi().then((YT) => {
     if (YT?.Player) {
       applyEntriesToPlayers(YT, entries);
