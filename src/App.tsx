@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import OBR from "@owlbear-rodeo/sdk";
-import { EmbeddedPlayer } from "./components/EmbeddedPlayer";
 import { PlaylistInspector } from "./components/PlaylistInspector";
 import { TreeBranch } from "./components/LibraryTree";
 import { useLibraryStore } from "./hooks/useLibraryStore";
-import type { LibraryNode, LibraryState, NodeId, PlaylistNode } from "./types";
-import { readLocalVolume, writeLocalVolume } from "./localPlayerSettings";
+import type { LibraryNode, NodeId, PlaylistNode } from "./types";
+import {
+  ROOM_SYNC_KEY,
+  asSharedRoomState,
+  buildSharedSignature,
+  isLibraryStateLike,
+  type LoadedPlaylist,
+  type SharedRoomState,
+} from "./sharedSync";
 import spriteUrl from "./sprite/sprite.svg";
 
 type RouteState =
@@ -13,29 +19,6 @@ type RouteState =
   | { type: "folder"; nodeId: NodeId }
   | { type: "playlist"; nodeId: NodeId };
 
-type LoadedPlaylist = {
-  id: NodeId;
-  name: string;
-  volume: number;
-  isPlaying: boolean;
-  isRepeatingTrack: boolean;
-  currentTrackIndex: number;
-  restartToken: number;
-};
-
-type SharedRoomState = {
-  version: 1;
-  library: LibraryState;
-  playback: {
-    loadedPlaylists: LoadedPlaylist[];
-    masterVolume: number;
-    isMuted: boolean;
-  };
-  updatedAt: number;
-  updatedBy: string;
-};
-
-const ROOM_SYNC_KEY = "odyssey-music/sync-v1";
 const SYNC_WRITE_DEBOUNCE_MS = 1200;
 const SYNC_MIN_WRITE_INTERVAL_MS = 1200;
 const SYNC_RATE_LIMIT_BACKOFF_MS = 5000;
@@ -46,68 +29,6 @@ const PLAYER_EMPTY_EXPANDED_HEIGHT = 88;
 const PLAYER_EXPANDED_HEIGHT = 150;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isLoadedPlaylist(value: unknown): value is LoadedPlaylist {
-  return isRecord(value)
-    && typeof value.id === "string"
-    && typeof value.name === "string"
-    && typeof value.volume === "number"
-    && typeof value.isPlaying === "boolean"
-    && typeof value.isRepeatingTrack === "boolean"
-    && typeof value.currentTrackIndex === "number"
-    && typeof value.restartToken === "number";
-}
-
-function asSharedRoomState(value: unknown): SharedRoomState | null {
-  if (!isRecord(value) || value.version !== 1) {
-    return null;
-  }
-
-  const playback = value.playback;
-  if (!isRecord(playback)) {
-    return null;
-  }
-
-  if (
-    !Array.isArray(playback.loadedPlaylists)
-    || !playback.loadedPlaylists.every(isLoadedPlaylist)
-    || typeof playback.masterVolume !== "number"
-    || typeof playback.isMuted !== "boolean"
-    || !isRecord(value.library)
-    || typeof value.updatedAt !== "number"
-    || typeof value.updatedBy !== "string"
-  ) {
-    return null;
-  }
-
-  return value as SharedRoomState;
-}
-
-function isLibraryStateLike(value: unknown): value is LibraryState {
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  if (!Array.isArray(value.rootIds) || !isRecord(value.nodesById) || !isRecord(value.tracksById)) {
-    return false;
-  }
-
-  return value.rootIds.every((id) => typeof id === "string");
-}
-
-function buildSharedSignature(input: {
-  library: LibraryState;
-  playback: SharedRoomState["playback"];
-}) {
-  return JSON.stringify({
-    library: input.library,
-    playback: input.playback,
-  });
-}
 
 type NodeModalMode =
   | { type: "closed" }
@@ -421,36 +342,6 @@ export function App() {
     ? getTracksForPlaylist(activePlaylist.id)
     : [];
 
-  const loadedPlaylistPlayers = useMemo(
-    () =>
-      loadedPlaylists
-        .map((playlist) => {
-          const node = library.nodesById[playlist.id];
-          const tracks =
-            node?.type === "playlist"
-              ? node.trackIds
-                  .map((trackId: string) => library.tracksById[trackId])
-                  .filter(Boolean)
-              : [];
-
-          return {
-            playlistId: playlist.id,
-            name: playlist.name,
-            volume: playlist.volume,
-            isPlaying: playlist.isPlaying,
-            isRepeatingTrack: playlist.isRepeatingTrack,
-            currentTrackIndex: Math.min(
-              playlist.currentTrackIndex,
-              Math.max(tracks.length - 1, 0),
-            ),
-            restartToken: playlist.restartToken,
-            tracks,
-          };
-        })
-        .filter((playlist) => playlist.tracks.length > 0),
-    [library.nodesById, library.tracksById, loadedPlaylists],
-  );
-
   useEffect(() => {
     setLoadedPlaylists((current) => {
       let changed = false;
@@ -557,46 +448,6 @@ export function App() {
         return {
           ...playlist,
           currentTrackIndex: nextTrackIndex,
-          isPlaying: true,
-          restartToken: 0,
-        };
-      }),
-    );
-  }
-
-  function advancePlaylistTrack(playlistId: NodeId) {
-    const playlistNode = library.nodesById[playlistId];
-    if (!playlistNode || playlistNode.type !== "playlist") {
-      return;
-    }
-
-    setLoadedPlaylists((current) =>
-      current.map((playlist) => {
-        if (playlist.id !== playlistId) {
-          return playlist;
-        }
-
-        if (playlist.isRepeatingTrack) {
-          return {
-            ...playlist,
-            isPlaying: true,
-            restartToken: playlist.restartToken + 1,
-          };
-        }
-
-        const lastTrackIndex = Math.max(playlistNode.trackIds.length - 1, 0);
-        if (playlist.currentTrackIndex < lastTrackIndex) {
-          return {
-            ...playlist,
-            currentTrackIndex: playlist.currentTrackIndex + 1,
-            isPlaying: true,
-            restartToken: 0,
-          };
-        }
-
-        return {
-          ...playlist,
-          currentTrackIndex: 0,
           isPlaying: true,
           restartToken: 0,
         };
@@ -1127,12 +978,6 @@ export function App() {
             )}
           </div>
         ) : null}
-        <EmbeddedPlayer
-          playlists={loadedPlaylistPlayers}
-          masterVolume={playbackVolume}
-          isMuted={isMuted}
-          onPlaylistEnded={advancePlaylistTrack}
-        />
       </footer>
 
       {!isPlayerView && nodeModal.type !== "closed" ? (
