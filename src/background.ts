@@ -4,7 +4,6 @@ import {
   ROOM_SYNC_KEY,
   asSharedRoomState,
   buildSharedSignature,
-  isLibraryStateLike,
   type SharedRoomState,
 } from "./sharedSync";
 import { ensureYouTubeApi, extractVideoId, type YTApi, type YTPlayer } from "./youtube";
@@ -53,15 +52,9 @@ function getPlayerHost() {
 function getPlayableEntries(sharedState: SharedRoomState): PlayableEntry[] {
   return sharedState.playback.loadedPlaylists
     .map((playlist) => {
-      const node = sharedState.library.nodesById[playlist.id];
-      if (node?.type !== "playlist") {
-        return null;
-      }
-
-      const trackId = node.trackIds[
-        Math.min(playlist.currentTrackIndex, Math.max(node.trackIds.length - 1, 0))
+      const track = playlist.tracks[
+        Math.min(playlist.currentTrackIndex, Math.max(playlist.tracks.length - 1, 0))
       ];
-      const track = trackId ? sharedState.library.tracksById[trackId] : null;
       const videoId = track ? extractVideoId(track.url) : null;
       if (!videoId) {
         return null;
@@ -218,14 +211,7 @@ function applyEntriesToPlayers(YT: YTApi, entries: PlayableEntry[]) {
 }
 
 function applySharedState(sharedState: SharedRoomState) {
-  if (!isLibraryStateLike(sharedState.library)) {
-    return;
-  }
-
-  const signature = buildSharedSignature({
-    library: sharedState.library,
-    playback: sharedState.playback,
-  });
+  const signature = buildSharedSignature(sharedState.playback);
   if (signature === latestSignature) {
     return;
   }
@@ -274,11 +260,6 @@ async function advancePlaylistTrack(playlistIdToAdvance: string) {
       return playlist;
     }
 
-    const playlistNode = latestSharedState?.library.nodesById[playlist.id];
-    if (playlistNode?.type !== "playlist") {
-      return playlist;
-    }
-
     if (playlist.isRepeatingTrack) {
       return {
         ...playlist,
@@ -287,7 +268,7 @@ async function advancePlaylistTrack(playlistIdToAdvance: string) {
       };
     }
 
-    const lastTrackIndex = Math.max(playlistNode.trackIds.length - 1, 0);
+    const lastTrackIndex = Math.max(playlist.tracks.length - 1, 0);
     return {
       ...playlist,
       currentTrackIndex: playlist.currentTrackIndex < lastTrackIndex
