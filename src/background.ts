@@ -12,7 +12,7 @@ const statusElement = document.getElementById("background-status");
 const GM_POPOVER_WIDTH = 585;
 const GM_POPOVER_HEIGHT = 400;
 const PLAYER_POPOVER_WIDTH = 585;
-const PLAYER_POPOVER_HEIGHT = 55;
+const PLAYER_POPOVER_HEIGHT = 52;
 
 type PlayableEntry = {
   playlistId: string;

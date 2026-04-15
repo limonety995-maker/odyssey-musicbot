@@ -22,6 +22,8 @@ type RouteState =
 const SYNC_WRITE_DEBOUNCE_MS = 1200;
 const SYNC_MIN_WRITE_INTERVAL_MS = 1200;
 const SYNC_RATE_LIMIT_BACKOFF_MS = 5000;
+const PLAYER_COLLAPSED_HEIGHT = 52;
+const PLAYER_EXPANDED_HEIGHT = 210;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
@@ -89,6 +91,7 @@ export function App() {
   const [loadedPlaylists, setLoadedPlaylists] = useState<LoadedPlaylist[]>([]);
   const [showLoadedTracks, setShowLoadedTracks] = useState(false);
   const [volume, setVolume] = useState(70);
+  const [localVolume, setLocalVolume] = useState(() => readLocalVolume());
   const [isMuted, setIsMuted] = useState(false);
   const [nodeModal, setNodeModal] = useState<NodeModalMode>({ type: "closed" });
   const [nodeNameDraft, setNodeNameDraft] = useState("");
@@ -545,7 +548,9 @@ export function App() {
   const canCreatePlaylist =
     route.type === "folder" && activeNode?.type === "folder";
   const isPlayerView = isOwlbearReady && !isGm;
-  const isLoadedPanelOpen = !isPlayerView && showLoadedTracks;
+  const isLoadedPanelOpen = showLoadedTracks;
+  const visibleVolume = isPlayerView ? localVolume : isMuted ? 0 : volume;
+  const playbackVolume = isPlayerView ? localVolume : volume;
 
   useEffect(() => {
     document.body.classList.toggle("player-view-body", isPlayerView);
@@ -553,6 +558,16 @@ export function App() {
       document.body.classList.remove("player-view-body");
     };
   }, [isPlayerView]);
+
+  useEffect(() => {
+    if (!isPlayerView) {
+      return;
+    }
+
+    void OBR.action.setHeight(
+      showLoadedTracks ? PLAYER_EXPANDED_HEIGHT : PLAYER_COLLAPSED_HEIGHT,
+    );
+  }, [isPlayerView, showLoadedTracks]);
 
   return (
     <div className={`container ${isPlayerView ? "player-view" : ""}`}>
@@ -690,11 +705,18 @@ export function App() {
                 </svg>
               </button>
             ) : (
-              <span className="icon-button player-static-toggle" aria-hidden="true">
+              <button
+                className="icon-button player-panel-toggle"
+                type="button"
+                aria-label={showLoadedTracks ? "Hide loaded music" : "Show loaded music"}
+                onClick={() => setShowLoadedTracks((current) => !current)}
+              >
                 <svg width="16" height="16" className="icon">
-                  <use xlinkHref={`${spriteHref}#icon-down`}></use>
+                  <use
+                    xlinkHref={`${spriteHref}#${showLoadedTracks ? "icon-up" : "icon-down"}`}
+                  ></use>
                 </svg>
-              </span>
+              </button>
             )}
             <svg
               height="28"
@@ -766,12 +788,17 @@ export function App() {
               type="range"
               min="0"
               max="100"
-              value={isMuted ? 0 : volume}
+              value={visibleVolume}
               style={
-                { "--slider-fill": `${isMuted ? 0 : volume}%` } as CSSProperties
+                { "--slider-fill": `${visibleVolume}%` } as CSSProperties
               }
               onChange={(event) => {
                 const nextVolume = Number(event.target.value);
+                if (isPlayerView) {
+                  setLocalVolume(writeLocalVolume(nextVolume));
+                  return;
+                }
+
                 setVolume(nextVolume);
                 setIsMuted(nextVolume === 0);
               }}
@@ -887,28 +914,30 @@ export function App() {
                               </>
                             ) : null}
                           </div>
-                          <input
-                            className="volume-slider playlist-volume-slider"
-                            type="range"
-                            min="0"
-                            max="100"
-                            value={playlist.volume}
-                            style={
-                              {
-                                "--slider-fill": `${playlist.volume}%`,
-                              } as CSSProperties
-                            }
-                            onChange={(event) => {
-                              const nextVolume = Number(event.target.value);
-                              setLoadedPlaylists((current) =>
-                                current.map((entry) =>
-                                  entry.id === playlist.id
-                                    ? { ...entry, volume: nextVolume }
-                                    : entry,
-                                ),
-                              );
-                            }}
-                          />
+                          {!isPlayerView ? (
+                            <input
+                              className="volume-slider playlist-volume-slider"
+                              type="range"
+                              min="0"
+                              max="100"
+                              value={playlist.volume}
+                              style={
+                                {
+                                  "--slider-fill": `${playlist.volume}%`,
+                                } as CSSProperties
+                              }
+                              onChange={(event) => {
+                                const nextVolume = Number(event.target.value);
+                                setLoadedPlaylists((current) =>
+                                  current.map((entry) =>
+                                    entry.id === playlist.id
+                                      ? { ...entry, volume: nextVolume }
+                                      : entry,
+                                  ),
+                                );
+                              }}
+                            />
+                          ) : null}
                           {!isPlayerView ? (
                             <>
                               <button
