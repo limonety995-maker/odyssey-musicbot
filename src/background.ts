@@ -1,5 +1,6 @@
 import OBR from "@owlbear-rodeo/sdk";
 import {
+  PLAYER_LOCAL_VOLUME_KEY,
   ROOM_SYNC_KEY,
   asSharedRoomState,
   buildSharedSignature,
@@ -12,7 +13,7 @@ const statusElement = document.getElementById("background-status");
 const GM_POPOVER_WIDTH = 585;
 const GM_POPOVER_HEIGHT = 400;
 const PLAYER_POPOVER_WIDTH = 585;
-const PLAYER_POPOVER_HEIGHT = 55;
+const PLAYER_POPOVER_HEIGHT = 48;
 
 type PlayableEntry = {
   playlistId: string;
@@ -91,6 +92,24 @@ function getMountNode(playlistId: string) {
   return mountNode;
 }
 
+function clampVolume(value: number) {
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function getPlayerLocalVolume() {
+  if (currentRole === "GM") {
+    return 100;
+  }
+
+  const storedVolume = window.localStorage.getItem(PLAYER_LOCAL_VOLUME_KEY);
+  if (storedVolume === null) {
+    return 100;
+  }
+
+  const parsedVolume = Number(storedVolume);
+  return Number.isFinite(parsedVolume) ? clampVolume(parsedVolume) : 100;
+}
+
 function destroyStalePlayers(activeEntries: PlayableEntry[]) {
   const activePlaylistIds = new Set(activeEntries.map((entry) => entry.playlistId));
 
@@ -108,11 +127,13 @@ function destroyStalePlayers(activeEntries: PlayableEntry[]) {
 }
 
 function syncPlayerPlayback(player: YTPlayer, entry: PlayableEntry) {
-  if (entry.volume <= 0) {
+  const effectiveVolume = Math.round((entry.volume * getPlayerLocalVolume()) / 100);
+
+  if (effectiveVolume <= 0) {
     player.mute();
   } else {
     player.unMute();
-    player.setVolume(entry.volume);
+    player.setVolume(effectiveVolume);
   }
 
   if (entry.isPlaying) {
@@ -202,6 +223,19 @@ function applySharedState(sharedState: SharedRoomState) {
   });
 }
 
+function reapplyLatestPlayback() {
+  if (!latestSharedState) {
+    return;
+  }
+
+  const entries = getPlayableEntries(latestSharedState);
+  void ensureYouTubeApi().then((YT) => {
+    if (YT?.Player) {
+      applyEntriesToPlayers(YT, entries);
+    }
+  });
+}
+
 async function advancePlaylistTrack(playlistIdToAdvance: string) {
   if (currentRole !== "GM" || !latestSharedState) {
     return;
@@ -287,5 +321,11 @@ OBR.onReady(() => {
   });
   OBR.player.onChange(() => {
     void applyActionSize();
+  });
+
+  window.addEventListener("storage", (event) => {
+    if (event.key === PLAYER_LOCAL_VOLUME_KEY && latestSharedState) {
+      reapplyLatestPlayback();
+    }
   });
 });

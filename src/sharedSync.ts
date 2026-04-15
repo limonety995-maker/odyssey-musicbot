@@ -23,6 +23,7 @@ export type SharedRoomState = {
 };
 
 export const ROOM_SYNC_KEY = "odyssey-music/sync-v1";
+export const PLAYER_LOCAL_VOLUME_KEY = "odyssey-music/player-local-volume";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
