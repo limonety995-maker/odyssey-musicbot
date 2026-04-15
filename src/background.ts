@@ -84,6 +84,19 @@ function buildPlayableSignature(entries: PlayableEntry[]) {
   return JSON.stringify(entries);
 }
 
+function describeEntries(entries: PlayableEntry[]) {
+  if (entries.length === 0) {
+    return "No playable YouTube tracks found.";
+  }
+
+  const playingEntries = entries.filter((entry) => entry.isPlaying);
+  if (playingEntries.length === 0) {
+    return `${entries.length} track${entries.length === 1 ? "" : "s"} ready, playback paused.`;
+  }
+
+  return `Playing ${playingEntries.length} track${playingEntries.length === 1 ? "" : "s"}.`;
+}
+
 function getMountNode(playlistId: string) {
   const host = getPlayerHost();
   const elementId = `background-yt-player-${playlistId}`;
@@ -173,6 +186,9 @@ function applyEntriesToPlayers(YT: YTApi, entries: PlayableEntry[]) {
               void advancePlaylistTrack(entry.playlistId);
             }
           },
+          onError: ({ data }) => {
+            setStatus(`YouTube playback error ${data}. This track may block embedded playback.`);
+          },
         },
       });
       continue;
@@ -230,7 +246,7 @@ function applySharedState(sharedState: SharedRoomState) {
     }
 
     applyEntriesToPlayers(YT, entries);
-    setStatus(`Background audio ready (${currentRole})`);
+    setStatus(`Background audio ready (${currentRole}): ${describeEntries(entries)}`);
   });
 }
 
