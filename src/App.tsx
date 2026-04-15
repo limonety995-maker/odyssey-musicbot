@@ -24,7 +24,7 @@ const SYNC_WRITE_DEBOUNCE_MS = 1200;
 const SYNC_MIN_WRITE_INTERVAL_MS = 1200;
 const SYNC_RATE_LIMIT_BACKOFF_MS = 5000;
 const PLAYER_COLLAPSED_HEIGHT = 48;
-const PLAYER_EXPANDED_HEIGHT = 210;
+const PLAYER_MAX_EXPANDED_HEIGHT = 210;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
@@ -120,6 +120,7 @@ export function App() {
   const syncWriteTimerRef = useRef<number | null>(null);
   const lastSyncWriteAtRef = useRef(0);
   const nextSyncWriteAllowedAtRef = useRef(0);
+  const playerFooterRef = useRef<HTMLElement | null>(null);
   
   useEffect(() => {
     const handleHashChange = () => {
@@ -602,10 +603,19 @@ export function App() {
       return;
     }
 
-    void OBR.action.setHeight(
-      showLoadedTracks ? PLAYER_EXPANDED_HEIGHT : PLAYER_COLLAPSED_HEIGHT,
-    );
-  }, [isOwlbearReady, isPlayerView, showLoadedTracks]);
+    const resizePlayerPopover = () => {
+      const measuredHeight = playerFooterRef.current?.scrollHeight ?? PLAYER_COLLAPSED_HEIGHT;
+      const nextHeight = showLoadedTracks
+        ? Math.min(Math.ceil(measuredHeight), PLAYER_MAX_EXPANDED_HEIGHT)
+        : PLAYER_COLLAPSED_HEIGHT;
+
+      void OBR.action.setHeight(nextHeight);
+    };
+
+    resizePlayerPopover();
+    const resizeFrame = window.requestAnimationFrame(resizePlayerPopover);
+    return () => window.cancelAnimationFrame(resizeFrame);
+  }, [isOwlbearReady, isPlayerView, loadedPlaylists.length, showLoadedTracks]);
 
   return (
     <div className={`container ${isPlayerView ? "player-view" : ""}`}>
@@ -727,7 +737,7 @@ export function App() {
         </>
       ) : null}
 
-      <footer className="audioplayer-container">
+      <footer className="audioplayer-container" ref={playerFooterRef}>
         <div className="footer-main-row">
           <div className="song-name-container">
             <button

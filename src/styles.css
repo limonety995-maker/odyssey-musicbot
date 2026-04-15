@@ -19,6 +19,12 @@ body.player-view-body {
   background: transparent;
 }
 
+body.player-view-body,
+body.player-view-body #app {
+  height: auto;
+  min-height: 0;
+}
+
 .icon {
   fill: #ffffff;
 }
