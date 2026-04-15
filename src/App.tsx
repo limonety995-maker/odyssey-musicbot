@@ -5,6 +5,7 @@ import { TreeBranch } from "./components/LibraryTree";
 import { useLibraryStore } from "./hooks/useLibraryStore";
 import type { LibraryNode, NodeId, PlaylistNode } from "./types";
 import {
+  PLAYER_LOCAL_VOLUME_KEY,
   ROOM_SYNC_KEY,
   asSharedRoomState,
   buildSharedSignature,
@@ -22,6 +23,8 @@ type RouteState =
 const SYNC_WRITE_DEBOUNCE_MS = 1200;
 const SYNC_MIN_WRITE_INTERVAL_MS = 1200;
 const SYNC_RATE_LIMIT_BACKOFF_MS = 5000;
+const PLAYER_COLLAPSED_HEIGHT = 48;
+const PLAYER_EXPANDED_HEIGHT = 210;
 
 const spriteHref = new URL(spriteUrl, import.meta.url).toString();
 
@@ -59,6 +62,20 @@ function getRouteForNodeId(type: "folder" | "playlist", nodeId: NodeId) {
   return `#/${type}/${encodeURIComponent(nodeId)}`;
 }
 
+function clampVolume(value: number) {
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function getStoredPlayerVolume() {
+  const storedVolume = window.localStorage.getItem(PLAYER_LOCAL_VOLUME_KEY);
+  if (storedVolume === null) {
+    return 100;
+  }
+
+  const parsedVolume = Number(storedVolume);
+  return Number.isFinite(parsedVolume) ? clampVolume(parsedVolume) : 100;
+}
+
 function getParentFolderId(
   node: LibraryNode | null,
   getNode: (nodeId: NodeId) => LibraryNode | null,
@@ -89,6 +106,7 @@ export function App() {
   const [loadedPlaylists, setLoadedPlaylists] = useState<LoadedPlaylist[]>([]);
   const [showLoadedTracks, setShowLoadedTracks] = useState(false);
   const [volume, setVolume] = useState(70);
+  const [playerVolume, setPlayerVolume] = useState(getStoredPlayerVolume);
   const [isMuted, setIsMuted] = useState(false);
   const [nodeModal, setNodeModal] = useState<NodeModalMode>({ type: "closed" });
   const [nodeNameDraft, setNodeNameDraft] = useState("");
@@ -545,7 +563,8 @@ export function App() {
   const canCreatePlaylist =
     route.type === "folder" && activeNode?.type === "folder";
   const isPlayerView = isOwlbearReady && !isGm;
-  const isLoadedPanelOpen = !isPlayerView && showLoadedTracks;
+  const isLoadedPanelOpen = showLoadedTracks;
+  const displayedVolume = isPlayerView ? playerVolume : isMuted ? 0 : volume;
 
   useEffect(() => {
     document.body.classList.toggle("player-view-body", isPlayerView);
@@ -553,6 +572,40 @@ export function App() {
       document.body.classList.remove("player-view-body");
     };
   }, [isPlayerView]);
+
+  useEffect(() => {
+    if (!isPlayerView) {
+      return;
+    }
+
+    window.localStorage.setItem(PLAYER_LOCAL_VOLUME_KEY, String(playerVolume));
+  }, [isPlayerView, playerVolume]);
+
+  useEffect(() => {
+    const handleStorageChange = (event: StorageEvent) => {
+      if (event.key !== PLAYER_LOCAL_VOLUME_KEY || event.newValue === null) {
+        return;
+      }
+
+      const nextVolume = Number(event.newValue);
+      if (Number.isFinite(nextVolume)) {
+        setPlayerVolume(clampVolume(nextVolume));
+      }
+    };
+
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
+  }, []);
+
+  useEffect(() => {
+    if (!isPlayerView || !isOwlbearReady) {
+      return;
+    }
+
+    void OBR.action.setHeight(
+      showLoadedTracks ? PLAYER_EXPANDED_HEIGHT : PLAYER_COLLAPSED_HEIGHT,
+    );
+  }, [isOwlbearReady, isPlayerView, showLoadedTracks]);
 
   return (
     <div className={`container ${isPlayerView ? "player-view" : ""}`}>
@@ -677,25 +730,18 @@ export function App() {
       <footer className="audioplayer-container">
         <div className="footer-main-row">
           <div className="song-name-container">
-            {!isPlayerView ? (
-              <button
-                className="icon-button"
-                type="button"
-                onClick={() => setShowLoadedTracks((current) => !current)}
-              >
-                <svg width="16" height="16" className="icon">
-                  <use
-                    xlinkHref={`${spriteHref}#${showLoadedTracks ? "icon-up" : "icon-down"}`}
-                  ></use>
-                </svg>
-              </button>
-            ) : (
-              <span className="icon-button player-static-toggle" aria-hidden="true">
-                <svg width="16" height="16" className="icon">
-                  <use xlinkHref={`${spriteHref}#icon-down`}></use>
-                </svg>
-              </span>
-            )}
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={showLoadedTracks ? "Hide loaded playlists" : "Show loaded playlists"}
+              onClick={() => setShowLoadedTracks((current) => !current)}
+            >
+              <svg width="16" height="16" className="icon">
+                <use
+                  xlinkHref={`${spriteHref}#${showLoadedTracks ? "icon-up" : "icon-down"}`}
+                ></use>
+              </svg>
+            </button>
             <svg
               height="28"
               width="28"
@@ -766,12 +812,17 @@ export function App() {
               type="range"
               min="0"
               max="100"
-              value={isMuted ? 0 : volume}
+              value={displayedVolume}
               style={
-                { "--slider-fill": `${isMuted ? 0 : volume}%` } as CSSProperties
+                { "--slider-fill": `${displayedVolume}%` } as CSSProperties
               }
               onChange={(event) => {
                 const nextVolume = Number(event.target.value);
+                if (isPlayerView) {
+                  setPlayerVolume(clampVolume(nextVolume));
+                  return;
+                }
+
                 setVolume(nextVolume);
                 setIsMuted(nextVolume === 0);
               }}
@@ -887,30 +938,30 @@ export function App() {
                               </>
                             ) : null}
                           </div>
-                          <input
-                            className="volume-slider playlist-volume-slider"
-                            type="range"
-                            min="0"
-                            max="100"
-                            value={playlist.volume}
-                            style={
-                              {
-                                "--slider-fill": `${playlist.volume}%`,
-                              } as CSSProperties
-                            }
-                            onChange={(event) => {
-                              const nextVolume = Number(event.target.value);
-                              setLoadedPlaylists((current) =>
-                                current.map((entry) =>
-                                  entry.id === playlist.id
-                                    ? { ...entry, volume: nextVolume }
-                                    : entry,
-                                ),
-                              );
-                            }}
-                          />
                           {!isPlayerView ? (
                             <>
+                              <input
+                                className="volume-slider playlist-volume-slider"
+                                type="range"
+                                min="0"
+                                max="100"
+                                value={playlist.volume}
+                                style={
+                                  {
+                                    "--slider-fill": `${playlist.volume}%`,
+                                  } as CSSProperties
+                                }
+                                onChange={(event) => {
+                                  const nextVolume = Number(event.target.value);
+                                  setLoadedPlaylists((current) =>
+                                    current.map((entry) =>
+                                      entry.id === playlist.id
+                                        ? { ...entry, volume: nextVolume }
+                                        : entry,
+                                    ),
+                                  );
+                                }}
+                              />
                               <button
                                 className="icon-button"
                                 type="button"
