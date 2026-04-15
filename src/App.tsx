@@ -193,10 +193,6 @@ export function App() {
             return;
           }
 
-          if (nextShared.updatedBy === playerIdRef.current) {
-            return;
-          }
-
           applySharedState(nextShared);
         });
       })();
